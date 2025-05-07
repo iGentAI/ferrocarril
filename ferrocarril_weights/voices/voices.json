@@ -1,0 +1,599 @@
+{
+  "format_version": "1.0",
+  "voices": {
+    "af_alloy": {
+      "name": "af_alloy",
+      "file": "af_alloy.bin",
+      "shape": [
+        510,
+        1,
+        256
+      ],
+      "dtype": "float32",
+      "byte_size": 522240
+    },
+    "af_aoede": {
+      "name": "af_aoede",
+      "file": "af_aoede.bin",
+      "shape": [
+        510,
+        1,
+        256
+      ],
+      "dtype": "float32",
+      "byte_size": 522240
+    },
+    "af_bella": {
+      "name": "af_bella",
+      "file": "af_bella.bin",
+      "shape": [
+        510,
+        1,
+        256
+      ],
+      "dtype": "float32",
+      "byte_size": 522240
+    },
+    "af_heart": {
+      "name": "af_heart",
+      "file": "af_heart.bin",
+      "shape": [
+        510,
+        1,
+        256
+      ],
+      "dtype": "float32",
+      "byte_size": 522240
+    },
+    "af_jessica": {
+      "name": "af_jessica",
+      "file": "af_jessica.bin",
+      "shape": [
+        510,
+        1,
+        256
+      ],
+      "dtype": "float32",
+      "byte_size": 522240
+    },
+    "af_kore": {
+      "name": "af_kore",
+      "file": "af_kore.bin",
+      "shape": [
+        510,
+        1,
+        256
+      ],
+      "dtype": "float32",
+      "byte_size": 522240
+    },
+    "af_nicole": {
+      "name": "af_nicole",
+      "file": "af_nicole.bin",
+      "shape": [
+        510,
+        1,
+        256
+      ],
+      "dtype": "float32",
+      "byte_size": 522240
+    },
+    "af_nova": {
+      "name": "af_nova",
+      "file": "af_nova.bin",
+      "shape": [
+        510,
+        1,
+        256
+      ],
+      "dtype": "float32",
+      "byte_size": 522240
+    },
+    "af_river": {
+      "name": "af_river",
+      "file": "af_river.bin",
+      "shape": [
+        510,
+        1,
+        256
+      ],
+      "dtype": "float32",
+      "byte_size": 522240
+    },
+    "af_sarah": {
+      "name": "af_sarah",
+      "file": "af_sarah.bin",
+      "shape": [
+        510,
+        1,
+        256
+      ],
+      "dtype": "float32",
+      "byte_size": 522240
+    },
+    "af_sky": {
+      "name": "af_sky",
+      "file": "af_sky.bin",
+      "shape": [
+        510,
+        1,
+        256
+      ],
+      "dtype": "float32",
+      "byte_size": 522240
+    },
+    "am_adam": {
+      "name": "am_adam",
+      "file": "am_adam.bin",
+      "shape": [
+        510,
+        1,
+        256
+      ],
+      "dtype": "float32",
+      "byte_size": 522240
+    },
+    "am_echo": {
+      "name": "am_echo",
+      "file": "am_echo.bin",
+      "shape": [
+        510,
+        1,
+        256
+      ],
+      "dtype": "float32",
+      "byte_size": 522240
+    },
+    "am_eric": {
+      "name": "am_eric",
+      "file": "am_eric.bin",
+      "shape": [
+        510,
+        1,
+        256
+      ],
+      "dtype": "float32",
+      "byte_size": 522240
+    },
+    "am_fenrir": {
+      "name": "am_fenrir",
+      "file": "am_fenrir.bin",
+      "shape": [
+        510,
+        1,
+        256
+      ],
+      "dtype": "float32",
+      "byte_size": 522240
+    },
+    "am_liam": {
+      "name": "am_liam",
+      "file": "am_liam.bin",
+      "shape": [
+        510,
+        1,
+        256
+      ],
+      "dtype": "float32",
+      "byte_size": 522240
+    },
+    "am_michael": {
+      "name": "am_michael",
+      "file": "am_michael.bin",
+      "shape": [
+        510,
+        1,
+        256
+      ],
+      "dtype": "float32",
+      "byte_size": 522240
+    },
+    "am_onyx": {
+      "name": "am_onyx",
+      "file": "am_onyx.bin",
+      "shape": [
+        510,
+        1,
+        256
+      ],
+      "dtype": "float32",
+      "byte_size": 522240
+    },
+    "am_puck": {
+      "name": "am_puck",
+      "file": "am_puck.bin",
+      "shape": [
+        510,
+        1,
+        256
+      ],
+      "dtype": "float32",
+      "byte_size": 522240
+    },
+    "am_santa": {
+      "name": "am_santa",
+      "file": "am_santa.bin",
+      "shape": [
+        510,
+        1,
+        256
+      ],
+      "dtype": "float32",
+      "byte_size": 522240
+    },
+    "bf_alice": {
+      "name": "bf_alice",
+      "file": "bf_alice.bin",
+      "shape": [
+        510,
+        1,
+        256
+      ],
+      "dtype": "float32",
+      "byte_size": 522240
+    },
+    "bf_emma": {
+      "name": "bf_emma",
+      "file": "bf_emma.bin",
+      "shape": [
+        510,
+        1,
+        256
+      ],
+      "dtype": "float32",
+      "byte_size": 522240
+    },
+    "bf_isabella": {
+      "name": "bf_isabella",
+      "file": "bf_isabella.bin",
+      "shape": [
+        510,
+        1,
+        256
+      ],
+      "dtype": "float32",
+      "byte_size": 522240
+    },
+    "bf_lily": {
+      "name": "bf_lily",
+      "file": "bf_lily.bin",
+      "shape": [
+        510,
+        1,
+        256
+      ],
+      "dtype": "float32",
+      "byte_size": 522240
+    },
+    "bm_daniel": {
+      "name": "bm_daniel",
+      "file": "bm_daniel.bin",
+      "shape": [
+        510,
+        1,
+        256
+      ],
+      "dtype": "float32",
+      "byte_size": 522240
+    },
+    "bm_fable": {
+      "name": "bm_fable",
+      "file": "bm_fable.bin",
+      "shape": [
+        510,
+        1,
+        256
+      ],
+      "dtype": "float32",
+      "byte_size": 522240
+    },
+    "bm_george": {
+      "name": "bm_george",
+      "file": "bm_george.bin",
+      "shape": [
+        510,
+        1,
+        256
+      ],
+      "dtype": "float32",
+      "byte_size": 522240
+    },
+    "bm_lewis": {
+      "name": "bm_lewis",
+      "file": "bm_lewis.bin",
+      "shape": [
+        510,
+        1,
+        256
+      ],
+      "dtype": "float32",
+      "byte_size": 522240
+    },
+    "ef_dora": {
+      "name": "ef_dora",
+      "file": "ef_dora.bin",
+      "shape": [
+        510,
+        1,
+        256
+      ],
+      "dtype": "float32",
+      "byte_size": 522240
+    },
+    "em_alex": {
+      "name": "em_alex",
+      "file": "em_alex.bin",
+      "shape": [
+        510,
+        1,
+        256
+      ],
+      "dtype": "float32",
+      "byte_size": 522240
+    },
+    "em_santa": {
+      "name": "em_santa",
+      "file": "em_santa.bin",
+      "shape": [
+        510,
+        1,
+        256
+      ],
+      "dtype": "float32",
+      "byte_size": 522240
+    },
+    "ff_siwis": {
+      "name": "ff_siwis",
+      "file": "ff_siwis.bin",
+      "shape": [
+        510,
+        1,
+        256
+      ],
+      "dtype": "float32",
+      "byte_size": 522240
+    },
+    "hf_alpha": {
+      "name": "hf_alpha",
+      "file": "hf_alpha.bin",
+      "shape": [
+        510,
+        1,
+        256
+      ],
+      "dtype": "float32",
+      "byte_size": 522240
+    },
+    "hf_beta": {
+      "name": "hf_beta",
+      "file": "hf_beta.bin",
+      "shape": [
+        510,
+        1,
+        256
+      ],
+      "dtype": "float32",
+      "byte_size": 522240
+    },
+    "hm_omega": {
+      "name": "hm_omega",
+      "file": "hm_omega.bin",
+      "shape": [
+        510,
+        1,
+        256
+      ],
+      "dtype": "float32",
+      "byte_size": 522240
+    },
+    "hm_psi": {
+      "name": "hm_psi",
+      "file": "hm_psi.bin",
+      "shape": [
+        510,
+        1,
+        256
+      ],
+      "dtype": "float32",
+      "byte_size": 522240
+    },
+    "if_sara": {
+      "name": "if_sara",
+      "file": "if_sara.bin",
+      "shape": [
+        510,
+        1,
+        256
+      ],
+      "dtype": "float32",
+      "byte_size": 522240
+    },
+    "im_nicola": {
+      "name": "im_nicola",
+      "file": "im_nicola.bin",
+      "shape": [
+        510,
+        1,
+        256
+      ],
+      "dtype": "float32",
+      "byte_size": 522240
+    },
+    "jf_alpha": {
+      "name": "jf_alpha",
+      "file": "jf_alpha.bin",
+      "shape": [
+        510,
+        1,
+        256
+      ],
+      "dtype": "float32",
+      "byte_size": 522240
+    },
+    "jf_gongitsune": {
+      "name": "jf_gongitsune",
+      "file": "jf_gongitsune.bin",
+      "shape": [
+        510,
+        1,
+        256
+      ],
+      "dtype": "float32",
+      "byte_size": 522240
+    },
+    "jf_nezumi": {
+      "name": "jf_nezumi",
+      "file": "jf_nezumi.bin",
+      "shape": [
+        510,
+        1,
+        256
+      ],
+      "dtype": "float32",
+      "byte_size": 522240
+    },
+    "jf_tebukuro": {
+      "name": "jf_tebukuro",
+      "file": "jf_tebukuro.bin",
+      "shape": [
+        510,
+        1,
+        256
+      ],
+      "dtype": "float32",
+      "byte_size": 522240
+    },
+    "jm_kumo": {
+      "name": "jm_kumo",
+      "file": "jm_kumo.bin",
+      "shape": [
+        510,
+        1,
+        256
+      ],
+      "dtype": "float32",
+      "byte_size": 522240
+    },
+    "pf_dora": {
+      "name": "pf_dora",
+      "file": "pf_dora.bin",
+      "shape": [
+        510,
+        1,
+        256
+      ],
+      "dtype": "float32",
+      "byte_size": 522240
+    },
+    "pm_alex": {
+      "name": "pm_alex",
+      "file": "pm_alex.bin",
+      "shape": [
+        510,
+        1,
+        256
+      ],
+      "dtype": "float32",
+      "byte_size": 522240
+    },
+    "pm_santa": {
+      "name": "pm_santa",
+      "file": "pm_santa.bin",
+      "shape": [
+        510,
+        1,
+        256
+      ],
+      "dtype": "float32",
+      "byte_size": 522240
+    },
+    "zf_xiaobei": {
+      "name": "zf_xiaobei",
+      "file": "zf_xiaobei.bin",
+      "shape": [
+        510,
+        1,
+        256
+      ],
+      "dtype": "float32",
+      "byte_size": 522240
+    },
+    "zf_xiaoni": {
+      "name": "zf_xiaoni",
+      "file": "zf_xiaoni.bin",
+      "shape": [
+        510,
+        1,
+        256
+      ],
+      "dtype": "float32",
+      "byte_size": 522240
+    },
+    "zf_xiaoxiao": {
+      "name": "zf_xiaoxiao",
+      "file": "zf_xiaoxiao.bin",
+      "shape": [
+        510,
+        1,
+        256
+      ],
+      "dtype": "float32",
+      "byte_size": 522240
+    },
+    "zf_xiaoyi": {
+      "name": "zf_xiaoyi",
+      "file": "zf_xiaoyi.bin",
+      "shape": [
+        510,
+        1,
+        256
+      ],
+      "dtype": "float32",
+      "byte_size": 522240
+    },
+    "zm_yunjian": {
+      "name": "zm_yunjian",
+      "file": "zm_yunjian.bin",
+      "shape": [
+        510,
+        1,
+        256
+      ],
+      "dtype": "float32",
+      "byte_size": 522240
+    },
+    "zm_yunxi": {
+      "name": "zm_yunxi",
+      "file": "zm_yunxi.bin",
+      "shape": [
+        510,
+        1,
+        256
+      ],
+      "dtype": "float32",
+      "byte_size": 522240
+    },
+    "zm_yunxia": {
+      "name": "zm_yunxia",
+      "file": "zm_yunxia.bin",
+      "shape": [
+        510,
+        1,
+        256
+      ],
+      "dtype": "float32",
+      "byte_size": 522240
+    },
+    "zm_yunyang": {
+      "name": "zm_yunyang",
+      "file": "zm_yunyang.bin",
+      "shape": [
+        510,
+        1,
+        256
+      ],
+      "dtype": "float32",
+      "byte_size": 522240
+    }
+  }
+}

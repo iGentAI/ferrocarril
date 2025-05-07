@@ -1,0 +1,11 @@
+{
+  "name": "bf_alice",
+  "file": "bf_alice.bin",
+  "shape": [
+    510,
+    1,
+    256
+  ],
+  "dtype": "float32",
+  "byte_size": 522240
+}

@@ -1,0 +1,11 @@
+{
+  "name": "am_fenrir",
+  "file": "am_fenrir.bin",
+  "shape": [
+    510,
+    1,
+    256
+  ],
+  "dtype": "float32",
+  "byte_size": 522240
+}

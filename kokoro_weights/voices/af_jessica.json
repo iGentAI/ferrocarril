@@ -1,0 +1,11 @@
+{
+  "name": "af_jessica",
+  "file": "af_jessica.bin",
+  "shape": [
+    510,
+    1,
+    256
+  ],
+  "dtype": "float32",
+  "byte_size": 522240
+}

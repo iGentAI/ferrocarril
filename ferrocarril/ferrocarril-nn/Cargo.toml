@@ -1,0 +1,13 @@
+[package]
+name = "ferrocarril-nn"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ferrocarril-core = { path = "../ferrocarril-core" }
+ferrocarril-dsp = { path = "../ferrocarril-dsp" }
+rand = "0.8.5"
+
+[features]
+default = ["weights"]
+weights = []
