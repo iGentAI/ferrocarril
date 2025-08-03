@@ -17,6 +17,7 @@ use crate::{
     linear::Linear,
 };
 use ferrocarril_core::tensor::Tensor;
+use ferrocarril_core::FerroError;
 use ferrocarril_dsp::stft::{CustomSTFT, StftConfig};
 use std::sync::Arc;
 
@@ -24,8 +25,7 @@ use std::sync::Arc;
 use ferrocarril_core::weights_binary::BinaryWeightLoader;
 #[cfg(feature = "weights")]
 use ferrocarril_core::LoadWeightsBinary;
-#[cfg(feature = "weights")]
-use ferrocarril_core::FerroError;
+
 
 /// UpSample1d for conditional upsampling operations
 #[derive(Clone, Copy)]
@@ -318,7 +318,7 @@ impl Generator {
         Tensor::from_data(result_3d, vec![batch, 1, new_time])
     }
     
-    pub fn forward(&self, x: &Tensor<f32>, s: &Tensor<f32>, f0: &Tensor<f32>) -> Tensor<f32> {
+    pub fn forward(&self, x: &Tensor<f32>, s: &Tensor<f32>, f0: &Tensor<f32>) -> Result<Tensor<f32>, FerroError> {
         // Verify input shapes
         if x.shape().len() != 3 {
             panic!("Generator input x must be 3-dimensional [B, C, T], got: {:?}", x.shape());
@@ -379,30 +379,14 @@ impl Generator {
             panic!("Harmonic source has unexpected shape: {:?}", har_source.shape());
         };
         
-        // Verify STFT input has sufficient samples
+        // Verify STFT input has sufficient samples - STRICT: NO SYNTHETIC FALLBACKS
         if har_source_for_stft.shape()[1] < self.gen_istft_n_fft {
-            println!("Harmonic source has insufficient samples for STFT ({} < {}). Creating synthetic output.",
-                    har_source_for_stft.shape()[1], self.gen_istft_n_fft);
-            
-            // This is a special case - when the harmonic source is too small,
-            // we generate a simple sine wave as a fallback. This matches Kokoro's
-            // behavior during inference with small inputs.
-            let sample_rate = 24000;
-            let duration = 1.0;
-            let frequency = 440.0;
-            
-            let num_samples = (sample_rate as f32 * duration) as usize;
-            let mut sine_wave = vec![0.0f32; batch_size * num_samples];
-            
-            for b in 0..batch_size {
-                for i in 0..num_samples {
-                    let t = i as f32 / sample_rate as f32;
-                    sine_wave[b * num_samples + i] = (2.0 * std::f32::consts::PI * frequency * t).sin() * 0.5;
-                }
-            }
-            
-            println!("Generated synthetic audio with {} samples", num_samples);
-            return Tensor::from_data(sine_wave, vec![batch_size, num_samples]);
+            return Err(FerroError::new(format!(
+                "CRITICAL TENSOR DIMENSION FAILURE: Harmonic source has insufficient samples for STFT ({} < {}). \
+                This indicates upstream tensor dimension collapse in the pipeline. \
+                NO SYNTHETIC CONTENT GENERATION ALLOWED.",
+                har_source_for_stft.shape()[1], self.gen_istft_n_fft
+            )));
         }
         
         // Apply STFT to get harmonic spectrogram
@@ -572,7 +556,7 @@ impl Generator {
         let phase_tensor = Tensor::from_data(phase_data, vec![batch, n_fft_half, time]);
         
         // Generate waveform using iSTFT
-        self.stft.inverse(&spec_tensor, &phase_tensor)
+        Ok(self.stft.inverse(&spec_tensor, &phase_tensor))
     }
 }
 
@@ -674,7 +658,7 @@ impl Decoder {
         f0_curve: &Tensor<f32>, // [B, T] - F0 curve from prosody predictor
         n: &Tensor<f32>,        // [B, T] - Noise from prosody predictor
         s: &Tensor<f32>         // [B, style_dim] - Voice style embedding (reference part)
-    ) -> Tensor<f32> {
+    ) -> Result<Tensor<f32>, FerroError> {
         println!("Decoder input shapes - asr: {:?}, f0: {:?}, noise: {:?}, style: {:?}",
                 asr.shape(), f0_curve.shape(), n.shape(), s.shape());
         
@@ -1121,7 +1105,7 @@ mod tests {
         let f0 = Tensor::from_data(vec![440.0; batch_size * time_dim], vec![batch_size, time_dim]);
         
         // Forward pass
-        let output = generator.forward(&x, &s, &f0);
+        let output = generator.forward(&x, &s, &f0).expect("Generator forward should succeed");
         
         // Check output shape (should be [B, T])
         assert_eq!(output.shape().len(), 2, "Output should be 2D");
@@ -1170,7 +1154,7 @@ mod tests {
         println!("Input shapes: x={:?}, s={:?}, f0={:?}", x.shape(), s.shape(), f0.shape());
         
         // Forward pass
-        let output = generator.forward(&x, &s, &f0);
+        let output = generator.forward(&x, &s, &f0).expect("Generator forward should succeed");
         
         // Check output shape (should be [B, T])
         assert_eq!(output.shape().len(), 2, "Output should be 2D");
@@ -1228,7 +1212,7 @@ mod tests {
         let style = Tensor::from_data(vec![0.1; batch_size * 64], vec![batch_size, 64]);
         
         // Forward pass
-        let output = decoder.forward(&asr, &f0_curve, &noise, &style);
+        let output = decoder.forward(&asr, &f0_curve, &noise, &style).expect("Decoder forward should succeed");
         
         // Check output shape (should be [B, T])
         assert_eq!(output.shape().len(), 2);
@@ -1269,7 +1253,7 @@ mod tests {
         let style = Tensor::from_data(vec![0.1; batch_size * 64], vec![batch_size, 64]);
         
         // Forward pass
-        let output = decoder.forward(&asr, &f0_curve, &noise, &style);
+        let output = decoder.forward(&asr, &f0_curve, &noise, &style).expect("Decoder forward should succeed");
         
         // Check output shape (should be [B, T])
         assert_eq!(output.shape().len(), 2);

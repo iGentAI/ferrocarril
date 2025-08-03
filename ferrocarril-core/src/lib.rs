@@ -2,6 +2,7 @@
 
 pub mod tensor;
 pub mod ops;
+pub mod g2p;
 #[cfg(feature = "weights")]
 pub mod weights;
 #[cfg(feature = "weights")]
@@ -10,6 +11,9 @@ pub mod weights_binary;
 use std::error::Error;
 use std::fmt;
 use tensor::Tensor;
+
+// Re-export the PhonesisG2P wrapper
+pub use g2p::PhonesisG2P;
 
 #[derive(Debug)]
 pub struct FerroError {

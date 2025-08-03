@@ -43,3 +43,7 @@ similar-asserts = "1.5"
 name = "dictionary_lookup"
 harness = false
 path = "benches/dictionary_lookup.rs"
+
+[[test]]
+name = "robustness_test"
+path = "tests/robustness_test.rs"

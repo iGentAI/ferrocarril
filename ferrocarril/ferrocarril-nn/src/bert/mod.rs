@@ -8,7 +8,7 @@ mod embeddings;
 mod attention;
 mod feed_forward;
 mod layer_norm;
-pub mod transformer;
+mod transformer;
 
 pub use embeddings::BertEmbeddings;
 pub use attention::MultiHeadAttention;

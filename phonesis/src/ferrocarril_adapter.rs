@@ -95,12 +95,11 @@ impl FerrocarrilG2PAdapter {
             return Ok(cached.clone());
         }
         
-        // Perform the conversion
+        // Use IPA standard to match Kokoro expectations
         let phonemes = self.inner.convert_to_standard(text, self.standard)?;
         
-        // Join phonemes as required by Ferrocarril
-        let separator = if self.join_with_spaces { " " } else { "" };
-        let result = phonemes.join(separator);
+        // Join with spaces to match misaki G2P format like "h ɛ l o w ɹ l d"
+        let result = phonemes.join(" ");
         
         // Cache the result if cache isn't too large
         if self.cache.len() < self.max_cache_size {

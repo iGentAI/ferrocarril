@@ -97,19 +97,16 @@ impl EnglishG2P {
                 
                 // Try rule-based conversion
                 if let Some(pronunciation) = self.rules.apply_with_context(word, rule_context.as_ref()) {
-                    // FIX: Only consider this a success if we have a reasonable number of phonemes
-                    // for the word length. A very conservative measure is 1/4 of character count.
                     let min_expected_phonemes = word.chars().count() / 4;
                     
                     if pronunciation.phonemes.len() >= min_expected_phonemes {
                         return Ok(pronunciation);
                     }
-                    
-                    // If we got fewer phonemes than expected, this is likely a partial match
-                    // and we should treat it as a failure
                 }
                 
-                Err(G2PError::UnknownWord(word.to_string()))
+                // If rules fail, fall back to character-by-character conversion
+                eprintln!("Warning: Rules failed for '{}', using character fallback", word);
+                self.character_fallback(word)
             },
             FallbackStrategy::Skip => {
                 // Skip unknown words
@@ -120,7 +117,6 @@ impl EnglishG2P {
                 // This would be a more sophisticated algorithm in a full implementation
                 // For now, just use rule-based fallback
                 if let Some(pronunciation) = self.rules.apply(word) {
-                    // FIX: Apply the same phoneme count check here as well
                     let min_expected_phonemes = word.chars().count() / 4;
                     
                     if pronunciation.phonemes.len() >= min_expected_phonemes {
@@ -128,7 +124,9 @@ impl EnglishG2P {
                     }
                 }
                 
-                Err(G2PError::UnknownWord(word.to_string()))
+                // If guessing fails, use character fallback
+                eprintln!("Warning: Phoneme guessing failed for '{}', using character fallback", word);
+                self.character_fallback(word)
             },
             FallbackStrategy::ReturnGraphemes => {
                 // Convert graphemes to phonemes directly
@@ -140,6 +138,90 @@ impl EnglishG2P {
                 Ok(PhonemeSequence::new(phonemes))
             },
         }
+    }
+    
+    /// Character-level fallback that ensures we always produce phonemes.
+    /// This is the last resort when all other methods fail.
+    fn character_fallback(&self, word: &str) -> Result<PhonemeSequence> {
+        let mut phonemes = Vec::new();
+        
+        for ch in word.chars() {
+            // Map individual characters to basic phonemes
+            let phoneme_sym = match ch.to_ascii_lowercase() {
+                'a' => "EY",
+                'b' => "B",
+                'c' => "S",  // Soft C as default
+                'd' => "D",
+                'e' => "IY",
+                'f' => "EH F",
+                'g' => "JH IY", 
+                'h' => "EY CH",
+                'i' => "AY",
+                'j' => "JH EY",
+                'k' => "K EY",
+                'l' => "EH L",
+                'm' => "EH M",
+                'n' => "EH N",
+                'o' => "OW",
+                'p' => "P IY",
+                'q' => "K Y UW",
+                'r' => "AA R",
+                's' => "EH S",
+                't' => "T IY",
+                'u' => "Y UW",
+                'v' => "V IY",
+                'w' => "D AH B AH L Y UW",
+                'x' => "EH K S",
+                'y' => "W AY",
+                'z' => "Z IY",
+                '0' => "Z IH R OW",
+                '1' => "W AH N",
+                '2' => "T UW",
+                '3' => "TH R IY",
+                '4' => "F AO R", 
+                '5' => "F AY V",
+                '6' => "S IH K S",
+                '7' => "S EH V AH N",
+                '8' => "EY T",
+                '9' => "N AY N",
+                '-' => "D AE SH",
+                '_' => "AH N D ER S K AO R",
+                '.' => "D AA T",
+                ',' => "K AA M AH",
+                '!' => "IH K S K L AH M EY SH AH N",
+                '?' => "K W EH S CH AH N",
+                '@' => "AE T",
+                '#' => "HH AE SH",
+                '$' => "D AA L ER",
+                '%' => "P ER S EH N T",
+                '&' => "AE N D",
+                
+                // For any other character, use a generic phoneme
+                _ => {
+                    if ch.is_alphabetic() {
+                        "AH"  // Schwa for unknown letters
+                    } else if ch.is_numeric() {
+                        "N AH M B ER"  // Generic "number"
+                    } else if ch.is_whitespace() {
+                        continue;  // Skip whitespace
+                    } else {
+                        "S IH M B AH L"  // Generic "symbol" 
+                    }
+                }
+            };
+            
+            // Split multi-phoneme strings and create phoneme objects
+            for p in phoneme_sym.split_whitespace() {
+                phonemes.push(Phoneme::new(p.to_string(), None));
+            }
+        }
+        
+        // If we ended up with no phonemes (e.g., all whitespace), add a silence phoneme
+        if phonemes.is_empty() {
+            phonemes.push(Phoneme::new("SIL", None));
+        }
+        
+        Ok(PhonemeSequence::new(phonemes))
     }
 }
 
@@ -156,46 +238,127 @@ impl GraphemeToPhoneme for EnglishG2P {
         
         // Process each token
         for token in tokens {
-            // Only process word tokens; skip punctuation, whitespace, etc.
-            if token.token_type == crate::normalizer::TokenType::Word {
-                // Look up in dictionary
-                if let Some(pronunciation) = self.dictionary.lookup(&token.text) {
-                    // Add all phonemes to the result
-                    for phoneme in &pronunciation.phonemes {
-                        result.push(phoneme.clone());
-                    }
-                } else {
-                    // Apply fallback strategy for unknown words
-                    match self.apply_fallback(&token.text, None) {
-                        Ok(pronunciation) => {
-                            // Add phonemes from fallback
-                            for phoneme in pronunciation.phonemes {
-                                result.push(phoneme);
-                            }
-                        },
-                        Err(e) => {
-                            // FIX: Handle Skip strategy correctly by propagating the error
-                            // immediately when we encounter an unknown word
-                            if self.options.fallback_strategy == FallbackStrategy::Skip {
-                                // Propagate the error directly for Skip strategy
-                                return Err(e);
-                            } else {
-                                // For other strategies, handle based on context
-                                match self.options.fallback_strategy {
-                                    FallbackStrategy::Skip => {
-                                        // This is redundant with check above, but kept for clarity
-                                        // Skip this word, continue to next
-                                        continue;
-                                    },
-                                    _ => {
-                                        // Propagate the error
-                                        return Err(e);
+            match token.token_type {
+                crate::normalizer::TokenType::Word => {
+                    // Look up in dictionary
+                    if let Some(pronunciation) = self.dictionary.lookup(&token.text) {
+                        // Add all phonemes to the result
+                        for phoneme in &pronunciation.phonemes {
+                            result.push(phoneme.clone());
+                        }
+                    } else {
+                        // Apply fallback strategy for unknown words
+                        match self.apply_fallback(&token.text, None) {
+                            Ok(pronunciation) => {
+                                // Add phonemes from fallback
+                                for phoneme in pronunciation.phonemes {
+                                    result.push(phoneme);
+                                }
+                            },
+                            Err(e) => {
+                                if self.options.fallback_strategy == FallbackStrategy::Skip {
+                                    // Propagate the error directly for Skip strategy
+                                    return Err(e);
+                                } else {
+                                    // For other strategies, this should not happen due to character_fallback
+                                    // But if it does, use emergency fallback
+                                    match self.character_fallback(&token.text) {
+                                        Ok(pronunciation) => {
+                                            for phoneme in pronunciation.phonemes {
+                                                result.push(phoneme);
+                                            }
+                                        },
+                                        Err(_) => {
+                                            // Last resort: add a silence phoneme
+                                            result.push(Phoneme::new("SIL", None));
+                                        }
                                     }
                                 }
                             }
                         }
                     }
-                }
+                },
+                crate::normalizer::TokenType::Punctuation | 
+                crate::normalizer::TokenType::Symbol => {
+                    // Handle punctuation and symbols through fallback
+                    match self.character_fallback(&token.text) {
+                        Ok(pronunciation) => {
+                            for phoneme in pronunciation.phonemes {
+                                result.push(phoneme);
+                            }
+                        },
+                        Err(_) => {
+                            // Fallback failed, skip or add silence based on strategy
+                            if self.options.fallback_strategy != FallbackStrategy::Skip {
+                                result.push(Phoneme::new("SIL", None));
+                            }
+                        }
+                    }
+                },
+                crate::normalizer::TokenType::Number => {
+                    // Numbers should have been processed in normalization
+                    // If we still have a Number token, try to convert it
+                    match self.apply_fallback(&token.text, None) {
+                        Ok(pronunciation) => {
+                            for phoneme in pronunciation.phonemes {
+                                result.push(phoneme);
+                            }
+                        },
+                        Err(_) => {
+                            // Use character fallback for numbers
+                            match self.character_fallback(&token.text) {
+                                Ok(pronunciation) => {
+                                    for phoneme in pronunciation.phonemes {
+                                        result.push(phoneme);
+                                    }
+                                },
+                                Err(_) => {
+                                    result.push(Phoneme::new("N AH M B ER", None));
+                                }
+                            }
+                        }
+                    }
+                },
+                crate::normalizer::TokenType::Alphanumeric => {
+                    // Mixed alphanumeric tokens
+                    match self.apply_fallback(&token.text, None) {
+                        Ok(pronunciation) => {
+                            for phoneme in pronunciation.phonemes {
+                                result.push(phoneme);
+                            }
+                        },
+                        Err(_) => {
+                            // Use character fallback
+                            match self.character_fallback(&token.text) {
+                                Ok(pronunciation) => {
+                                    for phoneme in pronunciation.phonemes {
+                                        result.push(phoneme);
+                                    }
+                                },
+                                Err(_) => {
+                                    result.push(Phoneme::new("SIL", None));
+                                }
+                            }
+                        }
+                    }
+                },
+                crate::normalizer::TokenType::Whitespace => {
+                    // Skip whitespace tokens
+                    continue;
+                },
+                crate::normalizer::TokenType::Unknown => {
+                    // Handle unknown token types through character fallback
+                    match self.character_fallback(&token.text) {
+                        Ok(pronunciation) => {
+                            for phoneme in pronunciation.phonemes {
+                                result.push(phoneme);
+                            }
+                        },
+                        Err(_) => {
+                            result.push(Phoneme::new("SIL", None));
+                        }
+                    }
+                },
             }
         }
         

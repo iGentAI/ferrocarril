@@ -6,14 +6,13 @@
 use std::error::Error;
 use std::path::Path;
 use std::fs;
-use ferrocarril_nn::bert::transformer::BertConfig;
-use ferrocarril_nn::bert::Bert;
+use ferrocarril_nn::bert::{CustomAlbert, CustomAlbertConfig}; // Fixed imports
 use ferrocarril_nn::Forward;
 use ferrocarril_core::tensor::Tensor;
 use serde_json::Value;
 
 fn main() -> Result<(), Box<dyn Error>> {
-    println!("Testing CustomBERT with direct file access...");
+    println!("Testing CustomAlbert with direct file access...");
     
     // Get the absolute path to the working directory
     let cwd = std::env::current_dir()?;
@@ -33,19 +32,18 @@ fn main() -> Result<(), Box<dyn Error>> {
     let num_attention_heads = config["plbert"]["num_attention_heads"].as_u64().unwrap_or(12) as usize;
     let num_hidden_layers = config["plbert"]["num_hidden_layers"].as_u64().unwrap_or(12) as usize;
     let intermediate_size = config["plbert"]["intermediate_size"].as_u64().unwrap_or(3072) as usize;
-    let dropout = config["dropout"].as_f64().unwrap_or(0.1) as f32;
     
-    // Create BERT model directly
-    let bert_config = BertConfig {
+    // Create CustomAlbert config - FIXED TYPE
+    let bert_config = CustomAlbertConfig {
         vocab_size,
+        embedding_size: 128, // Albert factorized embedding size
         hidden_size,
         num_attention_heads,
         num_hidden_layers,
         intermediate_size,
         max_position_embeddings: 512, // Default value
-        dropout_prob: dropout,
     };
-    println!("Created BERT config: vocab_size={}, hidden_size={}, num_heads={}, num_layers={}",
+    println!("Created CustomAlbert config: vocab_size={}, hidden_size={}, num_heads={}, num_layers={}",
             bert_config.vocab_size, 
             bert_config.hidden_size, 
             bert_config.num_attention_heads,
@@ -108,14 +106,17 @@ fn main() -> Result<(), Box<dyn Error>> {
         println!("Error reading weight directory");
     }
     
-    // Initialize a BERT model and run a forward pass with dummy weights
-    let bert = Bert::new(bert_config);
+    // Initialize CustomAlbert model
+    let bert = CustomAlbert::new(bert_config);
     
-    // Create a dummy input and run a forward pass
+    // Create a dummy input and run a forward pass  
     let input_ids = Tensor::from_data(vec![0, 1, 2, 3, 0], vec![1, 5]);
     
-    // Run forward pass
-    let output = bert.forward(&input_ids, None, None);
+    // Create simple attention mask [B, T] format for CustomAlbert
+    let attention_mask = Tensor::from_data(vec![1i64; 5], vec![1, 5]); // 1=attend, 0=mask
+    
+    // Run forward pass - FIXED: 2 arguments only
+    let output = bert.forward(&input_ids, Some(&attention_mask));
     println!("\nForward pass with uninitialized weights:");
     println!("  Output shape: {:?}", output.shape());
     

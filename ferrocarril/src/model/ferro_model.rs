@@ -2,8 +2,7 @@
 
 use ferrocarril_core::{Config, tensor::Tensor};
 use ferrocarril_nn::{text_encoder::TextEncoder, prosody::ProsodyPredictor, vocoder::Decoder, Forward};
-use ferrocarril_nn::bert::Bert;
-use ferrocarril_nn::bert::transformer::BertConfig;
+use ferrocarril_nn::bert::{CustomAlbert, CustomAlbertConfig};
 use ferrocarril_nn::linear::Linear;
 use std::error::Error;
 use serde_json; // Add serde_json for parsing voice metadata
@@ -28,9 +27,9 @@ pub struct FerroModel {
     #[cfg(feature = "weights")]
     text_encoder: Option<TextEncoder>,
     
-    /// CustomBERT component
+    /// CustomAlbert component
     #[cfg(feature = "weights")]
-    bert: Option<Bert>,
+    bert: Option<CustomAlbert>,
 
     /// BERT encoder linear projection
     #[cfg(feature = "weights")]
@@ -209,21 +208,21 @@ impl FerroModel {
         text_encoder.load_weights_binary(&loader)?;
         println!("Text encoder weights loaded successfully");
 
-        // Create and load BERT component
-        let bert_config = BertConfig {
+        // Create and load CustomAlbert component with fixed config type
+        let albert_config = CustomAlbertConfig {
             vocab_size: config.n_token,
+            embedding_size: 128,  // Albert factorized embedding size
             hidden_size: config.plbert.hidden_size,
             num_attention_heads: config.plbert.num_attention_heads,
             num_hidden_layers: config.plbert.num_hidden_layers,
             intermediate_size: config.plbert.intermediate_size,
-            max_position_embeddings: 512, // Default value for ALBERT
-            dropout_prob: config.dropout,
+            max_position_embeddings: 512,
         };
 
-        let mut bert = Bert::new(bert_config);
+        let mut bert = CustomAlbert::new(albert_config);
         // Use the component name that matches the weight converter output
         bert.load_weights_binary(&loader, "bert", "module")?;
-        println!("BERT weights loaded successfully");
+        println!("CustomAlbert weights loaded successfully");
 
         // Create and load BERT encoder (linear projection layer)
         let mut bert_encoder = Linear::new(
@@ -349,30 +348,14 @@ impl FerroModel {
                     vec![batch_size, seq_len]
                 );
                 
-                // 2. Process input through BERT and get hidden states
-                // Create attention mask: [batch_size, seq_len, seq_len] where 1 = masked position
-                let mut attention_mask = Tensor::from_data(
-                    vec![0; batch_size * seq_len * seq_len],
-                    vec![batch_size, seq_len, seq_len]
-                );
-                for b in 0..batch_size {
-                    for s1 in 0..seq_len {
-                        for s2 in 0..seq_len {
-                            if s1 >= input_lengths[b] || s2 >= input_lengths[b] {
-                                // Mask out positions beyond sequence length
-                                attention_mask[&[b, s1, s2]] = 1;
-                            }
-                        }
-                    }
-                }
-
                 // 1. Process input through TextEncoder - expects [B, T] input, outputs [B, C, T]
                 println!("Running TextEncoder...");
                 let t_en = text_encoder.forward(&input_ids_tensor, &input_lengths, &text_mask);
                 println!("TextEncoder output shape: {:?}", t_en.shape());
 
                 // 2. Process input through BERT - expects [B, T] input, outputs [B, T, C]
-                let bert_output = bert.forward(&input_ids_tensor, None, Some(&attention_mask));
+                let attention_mask = Tensor::from_data(vec![1i64; batch_size * seq_len], vec![batch_size, seq_len]);
+                let bert_output = bert.forward(&input_ids_tensor, Some(&attention_mask));
                 println!("BERT output shape: {:?}", bert_output.shape());
 
                 // 3. Project BERT output - input [B, T, C], output [B, T, hidden_dim]
@@ -438,7 +421,7 @@ impl FerroModel {
                     &style_embedding,
                     &text_mask,
                     &temp_alignment
-                );
+                ).map_err(|e| Box::new(e) as Box<dyn Error>)?;
 
                 // 7. Calculate durations from logits
                 let max_dur = prosody_predictor.max_dur;
@@ -470,7 +453,7 @@ impl FerroModel {
                     &style_embedding, 
                     &text_mask, 
                     &alignment_matrix
-                );
+                ).map_err(|e| Box::new(e) as Box<dyn Error>)?;
                 println!("Aligned encoder states shape: {:?}", en.shape());
 
                 // 11. Prepare input for predict_f0_noise, which expects [B, F, H]
@@ -495,7 +478,8 @@ impl FerroModel {
 
                 // 12. Predict F0 and noise
                 println!("Calling predict_f0_noise");
-                let (f0_pred, n_pred) = prosody_predictor.predict_f0_noise(&en_btf, &style_embedding);
+                let (f0_pred, n_pred) = prosody_predictor.predict_f0_noise(&en_btf, &style_embedding)
+                    .map_err(|e| Box::new(e) as Box<dyn Error>)?;
                 println!("F0 shape: {:?}, Noise shape: {:?}", f0_pred.shape(), n_pred.shape());
 
                 // 13. Create ASR tensor = t_en @ alignment_matrix
@@ -522,7 +506,13 @@ impl FerroModel {
 
                 // 14. Generate audio
                 println!("Calling decoder.forward");
-                let audio = decoder.forward(&asr, &f0_pred, &n_pred, &ref_embedding);
+                let audio_result = decoder.forward(&asr, &f0_pred, &n_pred, &ref_embedding);
+                let audio = match audio_result {
+                    Ok(audio_tensor) => audio_tensor,
+                    Err(e) => {
+                        return Err(Box::new(e) as Box<dyn Error>);
+                    }
+                };
                 println!("Generated audio shape: {:?}", audio.shape());
 
                 // Return audio data
@@ -789,11 +779,12 @@ impl FerroModel {
         );
         
         // Process through BERT and TextEncoder
+        // Create attention mask for BERT
         let attention_mask = Tensor::from_data(
-            vec![0; batch_size * seq_len * seq_len],
-            vec![batch_size, seq_len, seq_len]
+            vec![1i64; batch_size * seq_len], // 1=attend, 0=mask 
+            vec![batch_size, seq_len]
         );
-        let bert_output = bert.forward(&input_ids_tensor, None, Some(&attention_mask));
+        let bert_output = bert.forward(&input_ids_tensor, Some(&attention_mask));
         let d_en_btc = bert_encoder.forward(&bert_output);
         let t_en = text_encoder.forward(&input_ids_tensor, &input_lengths, &text_mask);
         
@@ -862,7 +853,8 @@ impl FerroModel {
         );
 
         // Process d_for_dur through predictor to get durations
-        let (dur_logits, _) = prosody_predictor.forward(&d_for_dur, &style_embedding, &text_mask, &temp_alignment);
+        let (dur_logits, _) = prosody_predictor.forward(&d_for_dur, &style_embedding, &text_mask, &temp_alignment)
+            .map_err(|e| Box::new(e) as Box<dyn Error>)?;
 
         // Calculate durations from logits (sigmoid + sum + scale)
         let mut durations = vec![0; seq_len];
@@ -894,7 +886,8 @@ impl FerroModel {
         println!("Created proper alignment matrix with shape [{}, {}]", seq_len, proper_alignment.shape()[1]);
 
         // Run forward pass with proper alignment and d_en (not d_for_dur)
-        let (_, en) = prosody_predictor.forward(&d_en, &style_embedding, &text_mask, &proper_alignment);
+        let (_, en) = prosody_predictor.forward(&d_en, &style_embedding, &text_mask, &proper_alignment)
+            .map_err(|e| Box::new(e) as Box<dyn Error>)?;
         
         // Convert en to [B, F, H] format for F0/noise prediction
         let mut en_btf_data = vec![0.0; batch_size * total_frames * self.config.hidden_dim];
@@ -935,7 +928,8 @@ impl FerroModel {
                  en_btf.shape(), effective_style_embedding.shape());
         
         // Predict F0 and noise
-        let (f0_pred, n_pred) = prosody_predictor.predict_f0_noise(&en_btf, &effective_style_embedding);
+        let (f0_pred, n_pred) = prosody_predictor.predict_f0_noise(&en_btf, &effective_style_embedding)
+            .map_err(|e| Box::new(e) as Box<dyn Error>)?;
         
         // Create batched alignment
         let mut batched_alignment = vec![0.0; batch_size * seq_len * total_frames];
@@ -972,9 +966,14 @@ impl FerroModel {
         );
         
         // Generate audio
-        let audio = decoder.forward(&asr, &f0_pred, &n_pred, &ref_embedding);
+        let audio_result = decoder.forward(&asr, &f0_pred, &n_pred, &ref_embedding);
+        let audio = match audio_result {
+            Ok(audio_tensor) => audio_tensor,
+            Err(e) => {
+                return Err(Box::new(e) as Box<dyn Error>);
+            }
+        };
         
-        // Return audio data
         Ok(audio.data().to_vec())
     }
 }

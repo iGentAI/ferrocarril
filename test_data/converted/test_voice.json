@@ -1,9 +1,0 @@
-{
-  "name": "test_voice",
-  "file": "test_voice.bin",
-  "shape": [
-    256
-  ],
-  "dtype": "float32",
-  "byte_size": 1024
-}
