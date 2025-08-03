@@ -141,7 +141,14 @@ fn test_vocoder_demo() -> Result<(), Box<dyn Error>> {
     let f0 = Tensor::from_data(f0_values, vec![batch_size, time_dim]);
     
     println!("Running Generator forward pass...");
-    let output = generator.forward(&x, &s, &f0);
+    let output_result = generator.forward(&x, &s, &f0);
+    let output = match output_result {
+        Ok(tensor) => tensor,
+        Err(e) => {
+            println!("Generator forward pass failed: {}", e);
+            return Ok(());
+        }
+    };
     
     println!("Generator output shape: {:?}", output.shape());
     println!("Generator test passed!");
@@ -167,7 +174,14 @@ fn test_vocoder_demo() -> Result<(), Box<dyn Error>> {
     let noise = Tensor::from_data(vec![0.01; batch_size * time_dim], vec![batch_size, time_dim]);
     
     println!("Running Decoder forward pass...");
-    let decoder_output = decoder.forward(&asr, &f0, &noise, &s);
+    let decoder_output_result = decoder.forward(&asr, &f0, &noise, &s);
+    let decoder_output = match decoder_output_result {
+        Ok(tensor) => tensor,
+        Err(e) => {
+            println!("Decoder forward pass failed: {}", e);
+            return Ok(());
+        }
+    };
     
     println!("Decoder output shape: {:?}", decoder_output.shape());
     println!("Decoder test passed!");

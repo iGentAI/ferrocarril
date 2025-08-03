@@ -5,14 +5,14 @@
 
 use std::error::Error;
 use std::path::Path;
-use ferrocarril_core::{Config, tensor::Tensor, LoadWeightsBinary};
+use ferrocarril_core::{Config, tensor::Tensor};
 use ferrocarril_core::weights_binary::BinaryWeightLoader;
-use ferrocarril_nn::bert::Bert;
-use ferrocarril_nn::bert::transformer::BertConfig;
-use ferrocarril_nn::Forward;
+use ferrocarril_nn::bert::{CustomAlbert, CustomAlbertConfig}; // Fixed imports
+use ferrocarril_core::LoadWeightsBinary;
+use ferrocarril_nn::Forward; // Added missing Forward trait
 
 fn main() -> Result<(), Box<dyn Error>> {
-    println!("Testing CustomBERT with real weights...");
+    println!("Testing CustomAlbert with real weights...");
     
     // Get the absolute path to the working directory
     let cwd = std::env::current_dir()?;
@@ -23,25 +23,25 @@ fn main() -> Result<(), Box<dyn Error>> {
     println!("Loading config from: {}", config_path);
     let config = Config::from_json(config_path)?;
     
-    // Create BERT config from model config
-    let bert_config = BertConfig {
+    // Create CustomAlbert config from model config - FIXED TYPE
+    let bert_config = CustomAlbertConfig {
         vocab_size: config.n_token,
+        embedding_size: 128, // Albert factorized embedding size
         hidden_size: config.plbert.hidden_size,
         num_attention_heads: config.plbert.num_attention_heads,
         num_hidden_layers: config.plbert.num_hidden_layers,
         intermediate_size: config.plbert.intermediate_size,
         max_position_embeddings: 512, // Default value for ALBERT
-        dropout_prob: config.dropout,
     };
-    println!("Created BERT config: vocab_size={}, hidden_size={}, num_heads={}, num_layers={}",
+    println!("Created CustomAlbert config: vocab_size={}, hidden_size={}, num_heads={}, num_layers={}",
             bert_config.vocab_size, 
             bert_config.hidden_size, 
             bert_config.num_attention_heads,
             bert_config.num_hidden_layers);
     
-    // Initialize CustomBERT
-    let mut bert = Bert::new(bert_config);
-    println!("Initialized CustomBERT model");
+    // Initialize CustomAlbert
+    let mut bert = CustomAlbert::new(bert_config);
+    println!("Initialized CustomAlbert model");
     
     // Load weights
     let weights_path = "/home/sandbox/ferrocarril_weights/model";
@@ -64,16 +64,13 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Create token IDs for the input text
     let input_ids = Tensor::from_data(vec![0, 1, 2, 3, 0], vec![1, 5]);
     
-    // Create attention mask (no masking for this test)
-    let attention_mask = Tensor::from_data(
-        vec![0; 1 * 5 * 5], // all zeros = no masking
-        vec![1, 5, 5]
-    );
+    // Create attention mask in correct [B, T] format for CustomAlbert
+    let attention_mask = Tensor::from_data(vec![1i64, 1, 1, 1, 0], vec![1, 5]); // 1=attend, 0=mask
     
-    // Run forward pass
-    let output = bert.forward(&input_ids, None, Some(&attention_mask));
+    // Run forward pass - FIXED: 2 arguments only (input_ids, attention_mask)
+    let output = bert.forward(&input_ids, Some(&attention_mask));
     
-    // Check output shape
+    // Check output shape 
     println!("Output shape: {:?}", output.shape());
     
     // Check if output contains non-zero values
@@ -107,9 +104,9 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
     
     if has_nonzero {
-        println!("✅ Test passed: CustomBERT produced non-zero outputs with real weights");
+        println!("✅ Test passed: CustomAlbert produced non-zero outputs with real weights");
     } else {
-        println!("❌ Test failed: CustomBERT produced all zeros");
+        println!("❌ Test failed: CustomAlbert produced all zeros");
     }
     
     Ok(())

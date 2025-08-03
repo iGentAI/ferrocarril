@@ -1,42 +1,42 @@
-//! Test program for the fixed BinaryWeightLoader with CustomBERT
+//! Test program for the fixed BinaryWeightLoader with CustomAlbert
 //!
 //! This program loads the BERT weights using the fixed BinaryWeightLoader
 //! and verifies that the forward pass with real weights produces non-zero outputs.
 
 use std::error::Error;
-use ferrocarril_core::{Config, tensor::Tensor, LoadWeightsBinary};
+use ferrocarril_core::{Config, tensor::Tensor};
 use ferrocarril_core::weights_binary::BinaryWeightLoader;
-use ferrocarril_nn::bert::Bert;
-use ferrocarril_nn::bert::transformer::BertConfig;
-use ferrocarril_nn::Forward;
+use ferrocarril_nn::bert::{CustomAlbert, CustomAlbertConfig}; // Fixed imports
+use ferrocarril_core::LoadWeightsBinary;
+use ferrocarril_nn::Forward; // Added missing Forward trait
 
 fn main() -> Result<(), Box<dyn Error>> {
-    println!("Testing fixed BinaryWeightLoader with CustomBERT...");
+    println!("Testing fixed BinaryWeightLoader with CustomAlbert...");
     
     // Load config
     let config_path = "/home/sandbox/ferrocarril_weights/config.json";
     println!("Loading config from: {}", config_path);
     let config = Config::from_json(config_path)?;
     
-    // Create BERT config
-    let bert_config = BertConfig {
+    // Create CustomAlbert config - FIXED TYPE
+    let bert_config = CustomAlbertConfig {
         vocab_size: config.n_token,
+        embedding_size: 128, // Albert factorized embedding size
         hidden_size: config.plbert.hidden_size,
         num_attention_heads: config.plbert.num_attention_heads,
         num_hidden_layers: config.plbert.num_hidden_layers,
         intermediate_size: config.plbert.intermediate_size,
         max_position_embeddings: 512, // Default value for ALBERT
-        dropout_prob: config.dropout,
     };
-    println!("Created BERT config: vocab_size={}, hidden_size={}, num_heads={}, num_layers={}",
+    println!("Created CustomAlbert config: vocab_size={}, hidden_size={}, num_heads={}, num_layers={}",
             bert_config.vocab_size, 
             bert_config.hidden_size, 
             bert_config.num_attention_heads,
             bert_config.num_hidden_layers);
     
-    // Initialize CustomBERT
-    let mut bert = Bert::new(bert_config);
-    println!("Initialized CustomBERT model");
+    // Initialize CustomAlbert
+    let mut bert = CustomAlbert::new(bert_config);
+    println!("Initialized CustomAlbert model");
     
     // Create fixed BinaryWeightLoader
     let weights_path = "/home/sandbox/ferrocarril_weights";
@@ -59,15 +59,12 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Create token IDs for the input text
     let input_ids = Tensor::from_data(vec![0, 1, 2, 3, 0], vec![1, 5]);
     
-    // Create attention mask (no masking for this test)
-    let attention_mask = Tensor::from_data(
-        vec![0; 1 * 5 * 5], // all zeros = no masking
-        vec![1, 5, 5]
-    );
+    // Create attention mask in correct format [B, T] for CustomAlbert 
+    let attention_mask = Tensor::from_data(vec![1i64, 1, 1, 1, 0], vec![1, 5]); // 1=attend, 0=mask
     
-    // Run forward pass
+    // Run forward pass - FIXED: 2 arguments only
     println!("Running forward pass with loaded weights...");
-    let output = bert.forward(&input_ids, None, Some(&attention_mask));
+    let output = bert.forward(&input_ids, Some(&attention_mask));
     
     // Check output shape
     println!("Output shape: {:?}", output.shape());
@@ -97,12 +94,15 @@ fn main() -> Result<(), Box<dyn Error>> {
     println!("  Average value: {}", avg);
     println!("  Min value: {}", min);
     println!("  Max value: {}", max);
-    println!("  First few values: {:?}", &output.data()[0..std::cmp::min(10, count)]);
+    if count > 0 {
+        let slice_end = std::cmp::min(count, 10);
+        println!("  First few values: {:?}", &output.data()[0..slice_end]);
+    }
     
     if has_nonzero {
-        println!("✅ Test passed: CustomBERT produced non-zero outputs with real weights");
+        println!("✅ Test passed: CustomAlbert produced non-zero outputs with real weights");
     } else {
-        println!("❌ Test failed: CustomBERT produced all zeros");
+        println!("❌ Test failed: CustomAlbert produced all zeros");
     }
     
     Ok(())

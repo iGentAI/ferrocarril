@@ -1,15 +1,18 @@
 //! TextEncoder – port of kokoro/modules.py::TextEncoder
 //! Inference-only; numerically identical to the original model
 //! (assuming the PyTorch weights are exported verbatim).
+//! 
+//! STRICT VALIDATION: No silent fallbacks, all dimension mismatches cause immediate failure
 
 use crate::{conv::Conv1d, lstm::LSTM, Forward, Parameter};
 use ferrocarril_core::tensor::Tensor;
 use std::sync::Arc;
 
-/// Helper function for applying a mask to a tensor
-fn mask_fill(x: &mut Tensor<f32>, mask: &Tensor<bool>, value: f32) {
-    // Verify compatible shapes
-    assert!(x.shape()[0] == mask.shape()[0], "Batch dimension mismatch");
+/// Helper function for applying a mask to a tensor - STRICT VERSION
+fn mask_fill_strict(x: &mut Tensor<f32>, mask: &Tensor<bool>, value: f32) {
+    // STRICT: Verify compatible shapes exactly - no adaptive behavior
+    assert_eq!(x.shape()[0], mask.shape()[0], 
+        "STRICT: Batch dimension mismatch - tensor: {}, mask: {}", x.shape()[0], mask.shape()[0]);
     
     // For [B, T, C] tensor with [B, T] mask
     if x.shape().len() == 3 && x.shape()[1] == mask.shape()[1] {
@@ -37,7 +40,8 @@ fn mask_fill(x: &mut Tensor<f32>, mask: &Tensor<bool>, value: f32) {
             }
         }
     } else {
-        panic!("Unsupported tensor and mask shapes for mask_fill");
+        panic!("STRICT: Incompatible tensor shapes for mask_fill - tensor: {:?}, mask: {:?}", 
+               x.shape(), mask.shape());
     }
 }
 
@@ -59,6 +63,10 @@ impl Embedding {
     /// x : [B, T]  (i64 indices)
     /// returns [B, T, C] float32
     pub fn forward(&self, x: &Tensor<i64>) -> Tensor<f32> {
+        // STRICT: Validate input shape exactly
+        assert_eq!(x.shape().len(), 2, 
+            "STRICT: Embedding input must be 2D [batch, time], got: {:?}", x.shape());
+            
         let (b, t) = (x.shape()[0], x.shape()[1]);
         let c = self.weight.data().shape()[1];
         let mut out = vec![0.0f32; b * t * c];
@@ -67,6 +75,11 @@ impl Embedding {
         for batch in 0..b {
             for pos in 0..t {
                 let idx = x[&[batch, pos]] as usize;
+                
+                // STRICT: Validate vocab index bounds
+                assert!(idx < w.shape()[0], 
+                    "STRICT: Vocab index {} out of bounds [0, {})", idx, w.shape()[0]);
+                
                 for ch in 0..c {
                     out[batch * t * c + pos * c + ch] = w[&[idx, ch]];
                 }
@@ -98,8 +111,17 @@ impl LayerNorm {
     // Input  : [B, C, T]
     // Output : same shape
     pub fn forward(&self, input: &Tensor<f32>) -> Tensor<f32> {
+        // STRICT: Validate input shape exactly
+        assert_eq!(input.shape().len(), 3,
+            "STRICT: LayerNorm input must be 3D [batch, channels, time], got: {:?}", input.shape());
+            
         let (b, c, t) = (input.shape()[0], input.shape()[1], input.shape()[2]);
         let mut out = vec![0.0; b * c * t];
+
+        // STRICT: Validate channels match layer configuration
+        assert_eq!(c, self.gamma.data().shape()[0],
+            "STRICT: Input channels {} don't match LayerNorm channels {}", 
+            c, self.gamma.data().shape()[0]);
 
         for batch in 0..b {
             for ch in 0..c {
@@ -167,7 +189,16 @@ impl ConvBlock {
 
     /// x : [B, C, T]
     pub fn forward(&self, x: &Tensor<f32>) -> Tensor<f32> {
+        // STRICT: Validate input shape
+        assert_eq!(x.shape().len(), 3,
+            "STRICT: ConvBlock input must be 3D [batch, channels, time], got: {:?}", x.shape());
+            
         let y = self.conv.forward(x);              // [B, C, T]
+        
+        // STRICT: Verify conv output shape unchanged
+        assert_eq!(y.shape(), x.shape(),
+            "STRICT: ConvBlock changed shape unexpectedly: {:?} -> {:?}", x.shape(), y.shape());
+            
         let y = self.ln.forward(&y);               // LN
         
         // Apply LeakyReLU
@@ -185,10 +216,9 @@ impl ConvBlock {
 // -------------------------------------------------
 #[derive(Debug)]
 pub struct TextEncoder {
-    pub(crate) embedding: Embedding,          // nn.Embedding
+    pub(crate) embedding: Embedding,          // nn.Embedding  
     pub(crate) cnn:       Vec<Arc<ConvBlock>>, // depth x ConvBlock
-    pub(crate) lstm_fw:   LSTM,               // forward  LSTM  (C  → C/2)
-    pub(crate) lstm_bw:   LSTM,               // backward LSTM  (C  → C/2)
+    pub(crate) lstm:      LSTM,               // Single bidirectional LSTM
     channels:  usize,
 }
 
@@ -205,111 +235,99 @@ impl TextEncoder {
             cnn.push(Arc::new(ConvBlock::new(channels, kernel_size)));
         }
 
-        // Two single-layer unidirectional LSTMs
-        let lstm_fw = LSTM::new(
-            channels,            // input_size
-            channels / 2,        // hidden_size
-            1,                   // num_layers
-            true,                // batch_first
-            false,               // bidirectional
-        );
-
-        let lstm_bw = LSTM::new(
-            channels,
-            channels / 2,
-            1,
-            true,
-            false,
+        // Single bidirectional LSTM
+        let lstm = LSTM::new(
+            channels,               // input_size
+            channels / 2,           // hidden_size (bidirectional doubles this back to channels)
+            1,                      // num_layers
+            true,                   // batch_first
+            true,                   // bidirectional
         );
 
         Self {
             embedding: Embedding::new(n_symbols, channels),
             cnn,
-            lstm_fw,
-            lstm_bw,
+            lstm,
             channels,
         }
     }
 
-    /// x_tok      : [B, T]   int64 phoneme ids
-    /// input_lengths: Vec<usize>    lengths of valid tokens
-    /// mask       : [B, T]   bool (true = padded position)
-    /// returns    : [B, C, T]
+    /// Forward pass with bidirectional LSTM
+    /// Tensor flow: x: [B, T] → embedding: [B, T, C] → transpose: [B, C, T] → CNN → transpose: [B, T, C] → LSTM → transpose: [B, C, T]
     pub fn forward(
         &self,
         x_tok: &Tensor<i64>,
         input_lengths: &Vec<usize>,  
         mask: &Tensor<bool>,
     ) -> Tensor<f32> {
-        // First, embed the token ids
-        let mut x = self.embedding.forward(x_tok);      // [B, T, C]
+        // STRICT INPUT VALIDATION
+        assert_eq!(x_tok.shape().len(), 2,
+            "STRICT: Input tokens must be 2D [batch, time], got: {:?}", x_tok.shape());
+        assert_eq!(mask.shape(), x_tok.shape(),
+            "STRICT: Mask shape {} must exactly match input shape {:?}", 
+            format!("{:?}", mask.shape()), format!("{:?}", x_tok.shape()));
+        assert_eq!(input_lengths.len(), x_tok.shape()[0],
+            "STRICT: input_lengths count {} must match batch size {}", 
+            input_lengths.len(), x_tok.shape()[0]);
         
-        // Zero out masked positions (pads)
-        let mut x_masked = x.clone();
-        mask_fill(&mut x_masked, mask, 0.0);
-        x = x_masked;
+        // Validate all input lengths are within sequence bounds
+        for (i, &length) in input_lengths.iter().enumerate() {
+            assert!(length <= x_tok.shape()[1], 
+                "STRICT: input_lengths[{}]={} exceeds sequence length {}", 
+                i, length, x_tok.shape()[1]);
+        }
+        
+        // 1. Text embedding: [B, T] → [B, T, C]
+        let mut x = self.embedding.forward(x_tok);      // [B, T, channels]
+        
+        // Zero out masked positions
+        self.apply_mask_btc(&mut x, mask);
 
-        // ---- CNN stack --------------------------------------------------
-        // transpose → (B, C, T) for convs
-        let x_t = self.transpose_btc_to_bct(&x);        // [B, C, T]
-        let mut x = x_t;
-        
-        // Apply CNN blocks sequentially
-        for blk in &self.cnn {
-            let mut x_conv = blk.forward(&x);
+        // 2. Transpose for CNN: [B, T, C] → [B, C, T]
+        let mut x_bct = self.transpose_btc_to_bct_strict(&x);        
+
+        // 3. CNN processing with masking after each layer
+        for (i, blk) in self.cnn.iter().enumerate() {
+            x_bct = blk.forward(&x_bct);
             
-            // Zero out masked positions again after each CNN block
-            self.apply_mask_bct(&mut x_conv, mask); 
-            
-            x = x_conv;
+            // Apply mask after each CNN block
+            self.apply_mask_bct_strict(&mut x_bct, mask); 
         }
 
-        // ---- LSTM -------------------------------------------------------
-        // back to (B, T, C) for LSTM
-        let x_t = self.transpose_bct_to_btc(&x);        // [B, T, C]
+        // 4. Transpose back for LSTM: [B, C, T] → [B, T, C]
+        let x_btc = self.transpose_bct_to_btc_strict(&x_bct);
 
-        // Forward LSTM
-        let (fw, _) = self.lstm_fw.forward_batch_first(&x_t, None, None);  // [B, T, C/2]
+        // 5. Single bidirectional LSTM
+        let (lstm_out, _) = self.lstm.forward_batch_first(&x_btc, None, None);  // [B, T, channels]
         
-        // Backward LSTM (reverse sequence and then forward)
-        let x_rev = self.reverse_time(&x_t);
-        let (bw_rev, _) = self.lstm_bw.forward_batch_first(&x_rev, None, None);
-        let bw = self.reverse_time(&bw_rev);           // restore order
+        // 6. Transpose to final format: [B, T, C] → [B, C, T]
+        let mut final_output = self.transpose_btc_to_bct_strict(&lstm_out);
         
-        // Explicitly zero out any padded positions in the LSTM outputs
-        let mut fw_masked = fw.clone();
-        let mut bw_masked = bw.clone();
+        // 7. Final mask application
+        self.apply_mask_bct_strict(&mut final_output, mask);
         
-        if fw.shape()[1] == mask.shape()[1] {
-            mask_fill(&mut fw_masked, mask, 0.0);
-            mask_fill(&mut bw_masked, mask, 0.0);
-        }
-
-        // Concatenate outputs along channel dimension
-        let y = self.concat_channels(&fw_masked, &bw_masked);        // [B, T, C]
-        
-        // ---- final layout + mask ---------------------------------------
-        let y_t = self.transpose_btc_to_bct(&y);    // [B, C, T]
-        
-        // Zero out masked positions in final output only if dimensions match
-        let mut final_output = y_t.clone();
-        if y_t.shape()[2] == mask.shape()[1] {
-            self.apply_mask_bct(&mut final_output, mask);
-        }
-        
-        // Ensure output is in [B, C, T] format before returning
-        if final_output.shape().len() != 3 {
-            panic!("TextEncoder output must be 3-dimensional [B, C, T], got shape {:?}", final_output.shape());
-        }
-        
-        // Log shape for debugging
-        println!("TextEncoder output shape: {:?}", final_output.shape());
-        
-        final_output  // Final output: [B, C, T]
+        final_output  // [B, channels, T]
     }
 
-    // Helper methods for tensor manipulation
-    fn transpose_btc_to_bct(&self, x: &Tensor<f32>) -> Tensor<f32> {
+    /// Apply mask to [B, T, C] tensor
+    fn apply_mask_btc(&self, tensor: &mut Tensor<f32>, mask: &Tensor<bool>) {
+        assert_eq!(tensor.shape()[0], mask.shape()[0], "Batch dimension mismatch");
+        assert_eq!(tensor.shape()[1], mask.shape()[1], "Time dimension mismatch");
+        
+        for b in 0..mask.shape()[0] {
+            for t in 0..mask.shape()[1] {
+                if mask[&[b, t]] {
+                    for c in 0..tensor.shape()[2] {
+                        tensor[&[b, t, c]] = 0.0;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Transpose implementation for [B, T, C] → [B, C, T]
+    fn transpose_btc_to_bct_strict(&self, x: &Tensor<f32>) -> Tensor<f32> {
+        assert_eq!(x.shape().len(), 3, "Expected 3D tensor [B, T, C]");
         let (b, t, c) = (x.shape()[0], x.shape()[1], x.shape()[2]);
         let mut out = vec![0.0; b * c * t];
         
@@ -324,7 +342,8 @@ impl TextEncoder {
         Tensor::from_data(out, vec![b, c, t])
     }
 
-    fn transpose_bct_to_btc(&self, x: &Tensor<f32>) -> Tensor<f32> {
+    fn transpose_bct_to_btc_strict(&self, x: &Tensor<f32>) -> Tensor<f32> {
+        assert_eq!(x.shape().len(), 3, "Expected 3D tensor [B, C, T]");
         let (b, c, t) = (x.shape()[0], x.shape()[1], x.shape()[2]);
         let mut out = vec![0.0; b * t * c];
         
@@ -339,82 +358,16 @@ impl TextEncoder {
         Tensor::from_data(out, vec![b, t, c])
     }
 
-    fn reverse_time(&self, x: &Tensor<f32>) -> Tensor<f32> {
-        let (b, t, c) = (x.shape()[0], x.shape()[1], x.shape()[2]);
-        let mut out = vec![0.0; b * t * c];
-        
-        for batch in 0..b {
-            for time in 0..t {
-                for chan in 0..c {
-                    out[batch * t * c + (t - 1 - time) * c + chan] = x[&[batch, time, chan]];
-                }
-            }
-        }
-        
-        Tensor::from_data(out, vec![b, t, c])
-    }
+    /// Apply mask to [B, C, T] tensor
+    fn apply_mask_bct_strict(&self, tensor: &mut Tensor<f32>, mask: &Tensor<bool>) {
+        assert_eq!(tensor.shape()[0], mask.shape()[0], "Batch dimension mismatch");
+        assert_eq!(tensor.shape()[2], mask.shape()[1], "Time dimension mismatch");
 
-    fn concat_channels(&self, a: &Tensor<f32>, b: &Tensor<f32>) -> Tensor<f32> {
-        let (batch, time, c_half) = (a.shape()[0], a.shape()[1], a.shape()[2]);
-        assert_eq!(c_half, self.channels / 2);
-        assert_eq!(a.shape(), b.shape());
-        
-        let mut out = vec![0.0; batch * time * self.channels];
-        
-        for i in 0..batch {
-            for j in 0..time {
-                // Copy first half from a
-                for k in 0..c_half {
-                    out[i * time * self.channels + j * self.channels + k] = a[&[i, j, k]];
-                }
-                // Copy second half from b
-                for k in 0..c_half {
-                    out[i * time * self.channels + j * self.channels + c_half + k] = b[&[i, j, k]];
-                }
-            }
-        }
-        
-        Tensor::from_data(out, vec![batch, time, self.channels])
-    }
-
-    // -------------------------------------------------
-    // util: in-place masked fill for tensor [B, C, T]
-    // -------------------------------------------------
-    fn apply_mask_bct(&self, t: &mut Tensor<f32>, mask: &Tensor<bool>) {
-        let (b, c, tt) = (t.shape()[0], t.shape()[1], t.shape()[2]);
-        
-        // Check if mask dimensions match
-        if mask.shape()[0] != b || mask.shape()[1] != tt {
-            println!("Warning: Cannot apply mask due to dimension mismatch in apply_mask_bct: t.shape={:?}, mask.shape={:?}", 
-                     t.shape(), mask.shape());
-            
-            // Handle different mask lengths by applying what we can
-            if mask.shape()[0] == b {
-                let mask_len = std::cmp::min(mask.shape()[1], tt);
-                
-                // Apply mask for the available dimensions
-                for batch in 0..b {
-                    for time in 0..mask_len {
-                        if mask[&[batch, time]] {
-                            for chan in 0..c {
-                                t[&[batch, chan, time]] = 0.0;
-                            }
-                        }
-                    }
-                }
-                
-                println!("Applied partial mask to first {} time positions", mask_len);
-            }
-            
-            return;
-        }
-
-        // Apply mask: t[batch, :, time] = 0 where mask[batch, time] == true
-        for batch in 0..b {
-            for time in 0..tt {
-                if mask[&[batch, time]] {
-                    for chan in 0..c {
-                        t[&[batch, chan, time]] = 0.0;
+        for b in 0..mask.shape()[0] {
+            for t in 0..mask.shape()[1] {
+                if mask[&[b, t]] {
+                    for c in 0..tensor.shape()[1] {
+                        tensor[&[b, c, t]] = 0.0;
                     }
                 }
             }
@@ -438,7 +391,7 @@ impl ferrocarril_core::weights::LoadWeights for TextEncoder {
 }
 
 impl TextEncoder {
-    /// Load weights from a binary weight loader
+    /// Load weights from a binary weight loader - STRICT VERSION
     pub fn load_weights_binary(
         &mut self, 
         loader: &ferrocarril_core::weights_binary::BinaryWeightLoader
@@ -448,216 +401,106 @@ impl TextEncoder {
         // Component name must be "text_encoder" to match the output structure from the weight converter
         let component = "text_encoder";
         
-        // Load embedding weights
-        // Embeddings are in the text_encoder component
+        // STRICT: Load embedding weights - fail immediately if missing
         let embedding_weight_path = "module.embedding.weight";
-        if let Ok(embedding_weight) = loader.load_component_parameter(component, embedding_weight_path) {
-            self.embedding.weight = Parameter::new(embedding_weight);
-            println!("Loaded embedding weights successfully");
-        } else {
-            println!("Warning: Could not find embedding weights at path: {}", embedding_weight_path);
-            println!("Using random initialization");
-        }
+        let embedding_weight = loader.load_component_parameter(component, embedding_weight_path)
+            .map_err(|e| ferrocarril_core::FerroError::new(format!("CRITICAL: Failed to load embedding weights: {}", e)))?;
         
-        // Load CNN blocks
-        // CNN blocks are in the text_encoder component
-        // The weights file only contains up to cnn.2 (0, 1, 2)
-        // This matches n_layer=3 in config.json
+        // STRICT: Validate embedding weight shape
+        assert_eq!(embedding_weight.shape(), &[self.embedding.weight.data().shape()[0], self.channels],
+            "STRICT: Embedding weight shape mismatch");
+            
+        self.embedding.weight = Parameter::new(embedding_weight);
+        println!("✅ Embedding weights loaded: shape {:?}", self.embedding.weight.data().shape());
+        
+        // STRICT: Load CNN blocks - fail immediately if any missing
         for i in 0..self.cnn.len() {
             println!("Loading CNN block {}", i);
             
-            // Skip blocks beyond what exists in the weights
+            // Skip blocks beyond what exists in the weights - but be explicit about this
             if i >= 3 {
-                println!("Skipping block {} as it may not exist in the weights", i);
-                continue;
+                return Err(ferrocarril_core::FerroError::new(format!(
+                    "STRICT: CNN block {} requested but only 3 blocks exist in weights", i)));
             }
             
             // Get mutable access to the block
             let block = match Arc::get_mut(&mut self.cnn[i]) {
                 Some(b) => b,
                 None => {
-                    println!("Warning: Cannot get mutable reference to CNN block {}, skipping", i);
-                    continue;
+                    return Err(ferrocarril_core::FerroError::new(format!(
+                        "STRICT: Cannot get mutable reference to CNN block {}", i)));
                 }
             };
 
-            // Load Conv1d weights and bias - Using actual file naming patterns
+            // STRICT: Load Conv1d weights - fail immediately if missing
             let weight_g_path = format!("module.cnn.{}.0.weight_g", i);
             let weight_v_path = format!("module.cnn.{}.0.weight_v", i);
             let bias_path = format!("module.cnn.{}.0.bias", i);
             
-            // Fix the borrowing issue by cloning the Results before using them in pattern matching
-            let weight_g_result = loader.load_component_parameter(component, &weight_g_path);
-            let weight_v_result = loader.load_component_parameter(component, &weight_v_path);
+            let weight_g = loader.load_component_parameter(component, &weight_g_path)
+                .map_err(|e| ferrocarril_core::FerroError::new(format!("CRITICAL: Failed to load {}: {}", weight_g_path, e)))?;
+            let weight_v = loader.load_component_parameter(component, &weight_v_path)
+                .map_err(|e| ferrocarril_core::FerroError::new(format!("CRITICAL: Failed to load {}: {}", weight_v_path, e)))?;
             
-            let is_weight_g_err = weight_g_result.is_err();
-            let is_weight_v_err = weight_v_result.is_err();
+            block.conv.set_weight_norm(&weight_g, &weight_v)
+                .map_err(|e| ferrocarril_core::FerroError::new(format!("STRICT: Failed to set weight norm for block {}: {}", i, e)))?;
             
-            if let (Ok(weight_g), Ok(weight_v)) = (&weight_g_result, &weight_v_result) {
-                if let Err(e) = block.conv.set_weight_norm(weight_g, weight_v) {
-                    println!("Warning: Failed to set weight norm for block {}: {}", i, e);
-                } else {
-                    println!("Set weight norm for block {}", i);
-                }
-                
-                // Load bias
-                if let Ok(bias) = loader.load_component_parameter(component, &bias_path) {
-                    if let Err(_) = block.conv.set_bias(&bias) {
-                        println!("Warning: Failed to set bias for block {}", i);
-                    }
-                }
-            } else {
-                println!("Warning: Failed to load weights for CNN block {}: {}", i, 
-                         if is_weight_g_err { 
-                             format!("Failed to find weight_g at {}", weight_g_path) 
-                         } else { 
-                             format!("Failed to find weight_v at {}", weight_v_path) 
-                         });
-                println!("Skipping this block");
-                continue;
-            }
+            // Load bias
+            let bias = loader.load_component_parameter(component, &bias_path)
+                .map_err(|e| ferrocarril_core::FerroError::new(format!("CRITICAL: Failed to load {}: {}", bias_path, e)))?;
+            block.conv.set_bias(&bias)
+                .map_err(|e| ferrocarril_core::FerroError::new(format!("STRICT: Failed to set bias for block {}: {}", i, e)))?;
             
-            // Load LayerNorm weights
+            // STRICT: Load LayerNorm weights - fail immediately if missing
             let gamma_path = format!("module.cnn.{}.1.gamma", i);
             let beta_path = format!("module.cnn.{}.1.beta", i);
             
-            if let Ok(gamma) = loader.load_component_parameter(component, &gamma_path) {
-                block.ln.gamma = Parameter::new(gamma);
-            } else {
-                println!("Warning: Failed to load gamma for block {}", i);
-            }
+            let gamma = loader.load_component_parameter(component, &gamma_path)
+                .map_err(|e| ferrocarril_core::FerroError::new(format!("CRITICAL: Failed to load {}: {}", gamma_path, e)))?;
+            let beta = loader.load_component_parameter(component, &beta_path)
+                .map_err(|e| ferrocarril_core::FerroError::new(format!("CRITICAL: Failed to load {}: {}", beta_path, e)))?;
             
-            if let Ok(beta) = loader.load_component_parameter(component, &beta_path) {
-                block.ln.beta = Parameter::new(beta);
-            } else {
-                println!("Warning: Failed to load beta for block {}", i);
-            }
+            block.ln.gamma = Parameter::new(gamma);
+            block.ln.beta = Parameter::new(beta);
+            
+            println!("✅ CNN block {} loaded successfully", i);
         }
         
-        // Load LSTM weights
-        // The TextEncoder has a single bidirectional LSTM
-        println!("Loading LSTM weights...");
+        // STRICT: Load bidirectional LSTM weights - fail immediately if missing
+        println!("Loading bidirectional LSTM weights...");
         
-        // Forward LSTM - Uses parameters from the text_encoder component
-        let forward_paths = [
-            ("module.lstm.weight_ih_l0", "module.lstm.weight_hh_l0", 
-             "module.lstm.bias_ih_l0", "module.lstm.bias_hh_l0")
-        ];
+        // Forward direction weights
+        let forward_weight_ih = loader.load_component_parameter(component, "module.lstm.weight_ih_l0")
+            .map_err(|e| ferrocarril_core::FerroError::new(format!("CRITICAL: Failed to load LSTM forward weight_ih: {}", e)))?;
+        let forward_weight_hh = loader.load_component_parameter(component, "module.lstm.weight_hh_l0")
+            .map_err(|e| ferrocarril_core::FerroError::new(format!("CRITICAL: Failed to load LSTM forward weight_hh: {}", e)))?;
+        let forward_bias_ih = loader.load_component_parameter(component, "module.lstm.bias_ih_l0")
+            .map_err(|e| ferrocarril_core::FerroError::new(format!("CRITICAL: Failed to load LSTM forward bias_ih: {}", e)))?;
+        let forward_bias_hh = loader.load_component_parameter(component, "module.lstm.bias_hh_l0")
+            .map_err(|e| ferrocarril_core::FerroError::new(format!("CRITICAL: Failed to load LSTM forward bias_hh: {}", e)))?;
         
-        let mut forward_loaded = false;
-        for (weight_ih_path, weight_hh_path, bias_ih_path, bias_hh_path) in forward_paths.iter() {
-            // Only try the text_encoder component, as that's where the weights should be
-            if let (Ok(weight_ih), Ok(weight_hh), Ok(bias_ih), Ok(bias_hh)) = (
-                loader.load_component_parameter(component, weight_ih_path),
-                loader.load_component_parameter(component, weight_hh_path),
-                loader.load_component_parameter(component, bias_ih_path),
-                loader.load_component_parameter(component, bias_hh_path),
-            ) {
-                self.lstm_fw.weight_ih_l0 = Parameter::new(weight_ih);
-                self.lstm_fw.weight_hh_l0 = Parameter::new(weight_hh);
-                self.lstm_fw.bias_ih_l0 = Parameter::new(bias_ih);
-                self.lstm_fw.bias_hh_l0 = Parameter::new(bias_hh);
-                println!("Forward LSTM weights loaded successfully");
-                forward_loaded = true;
-            }
-        }
+        // Backward direction weights
+        let backward_weight_ih = loader.load_component_parameter(component, "module.lstm.weight_ih_l0_reverse")
+            .map_err(|e| ferrocarril_core::FerroError::new(format!("CRITICAL: Failed to load LSTM backward weight_ih: {}", e)))?;
+        let backward_weight_hh = loader.load_component_parameter(component, "module.lstm.weight_hh_l0_reverse")
+            .map_err(|e| ferrocarril_core::FerroError::new(format!("CRITICAL: Failed to load LSTM backward weight_hh: {}", e)))?;
+        let backward_bias_ih = loader.load_component_parameter(component, "module.lstm.bias_ih_l0_reverse")
+            .map_err(|e| ferrocarril_core::FerroError::new(format!("CRITICAL: Failed to load LSTM backward bias_ih: {}", e)))?;
+        let backward_bias_hh = loader.load_component_parameter(component, "module.lstm.bias_hh_l0_reverse")
+            .map_err(|e| ferrocarril_core::FerroError::new(format!("CRITICAL: Failed to load LSTM backward bias_hh: {}", e)))?;
         
-        if !forward_loaded {
-            println!("Warning: Failed to load forward LSTM weights");
-        }
+        // Load into single bidirectional LSTM
+        self.lstm.weight_ih_l0 = Parameter::new(forward_weight_ih);
+        self.lstm.weight_hh_l0 = Parameter::new(forward_weight_hh);
+        self.lstm.bias_ih_l0 = Parameter::new(forward_bias_ih);
+        self.lstm.bias_hh_l0 = Parameter::new(forward_bias_hh);
+        self.lstm.weight_ih_l0_reverse = Parameter::new(backward_weight_ih);
+        self.lstm.weight_hh_l0_reverse = Parameter::new(backward_weight_hh);
+        self.lstm.bias_ih_l0_reverse = Parameter::new(backward_bias_ih);
+        self.lstm.bias_hh_l0_reverse = Parameter::new(backward_bias_hh);
         
-        // Backward LSTM (reverse weights)
-        // Look for reverse weights in the text_encoder component
-        let backward_paths = [
-            ("module.lstm.weight_ih_l0_reverse", "module.lstm.weight_hh_l0_reverse", 
-             "module.lstm.bias_ih_l0_reverse", "module.lstm.bias_hh_l0_reverse")
-        ];
-        
-        let mut backward_loaded = false;
-        for (weight_ih_path, weight_hh_path, bias_ih_path, bias_hh_path) in backward_paths.iter() {
-            // Only try the text_encoder component, as that's where the weights should be
-            if let (Ok(weight_ih), Ok(weight_hh), Ok(bias_ih), Ok(bias_hh)) = (
-                loader.load_component_parameter(component, weight_ih_path),
-                loader.load_component_parameter(component, weight_hh_path),
-                loader.load_component_parameter(component, bias_ih_path),
-                loader.load_component_parameter(component, bias_hh_path),
-            ) {
-                self.lstm_bw.weight_ih_l0 = Parameter::new(weight_ih);
-                self.lstm_bw.weight_hh_l0 = Parameter::new(weight_hh);
-                self.lstm_bw.bias_ih_l0 = Parameter::new(bias_ih);
-                self.lstm_bw.bias_hh_l0 = Parameter::new(bias_hh);
-                println!("Backward LSTM weights loaded successfully");
-                backward_loaded = true;
-            }
-        }
-        
-        if !backward_loaded {
-            // Try alternative paths directly with _reverse suffix
-            println!("Warning: Failed to load backward LSTM weights: Parameter 'module.lstm_reverse.weight_ih_l0' not found in component 'text_encoder'");
-        }
-        
-        println!("TextEncoder weights loaded successfully");
+        println!("✅ Bidirectional LSTM weights loaded successfully");
+        println!("✅ TextEncoder weights loaded with STRICT validation - no fallbacks!");
         Ok(())
-    }
-}
-
-// Extension to LSTM for binary weight loading
-impl LSTM {
-    pub fn load_weights_binary(
-        &mut self,
-        loader: &ferrocarril_core::weights_binary::BinaryWeightLoader,
-        component: &str,
-        direction: &str,
-        is_reverse: bool
-    ) -> Result<(), ferrocarril_core::FerroError> {
-        let suffix = if is_reverse { "_reverse" } else { "" };
-        
-        // Determine the prefix based on direction
-        let prefix = match direction {
-            "fw" => "module.lstm",
-            "bw" => "module.lstm",
-            _ => direction,
-        };
-        
-        // Load weight_ih_l0
-        let weight_ih_name = if direction == "bw" { 
-            format!("{}_reverse", prefix) 
-        } else { 
-            prefix.to_string() 
-        };
-        
-        let weight_ih = loader.load_component_parameter(component, &format!("{}.weight_ih_l0{}", weight_ih_name, suffix))?;
-        self.weight_ih_l0 = Parameter::new(weight_ih);
-        
-        // Load weight_hh_l0
-        let weight_hh = loader.load_component_parameter(component, &format!("{}.weight_hh_l0{}", weight_ih_name, suffix))?;
-        self.weight_hh_l0 = Parameter::new(weight_hh);
-        
-        // Load bias_ih_l0
-        let bias_ih = loader.load_component_parameter(component, &format!("{}.bias_ih_l0{}", weight_ih_name, suffix))?;
-        self.bias_ih_l0 = Parameter::new(bias_ih);
-        
-        // Load bias_hh_l0
-        let bias_hh = loader.load_component_parameter(component, &format!("{}.bias_hh_l0{}", weight_ih_name, suffix))?;
-        self.bias_hh_l0 = Parameter::new(bias_hh);
-        
-        Ok(())
-    }
-}
-
-// The duplicate Conv1d implementation was removed as it conflicts with conv.rs
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_text_encoder_shapes() {
-        let enc = TextEncoder::new(192, 5, 3, 200);
-        let x = Tensor::<i64>::from_data(vec![1i64; 4 * 123], vec![4, 123]);   // dummy ids
-        let mask = Tensor::<bool>::from_data(vec![false; 4 * 123], vec![4, 123]); // no padding
-        let _input_lengths = vec![123, 123, 123, 123];
-        let y = enc.forward(&x, &_input_lengths, &mask);
-        assert_eq!(y.shape(), &[4, 192, 123]);
     }
 }

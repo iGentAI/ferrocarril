@@ -150,29 +150,44 @@ impl Normalizer {
                     }
                 },
                 TokenType::Punctuation => {
-                    // Handle special cases for punctuation
-                    match token.text.as_str() {
-                        "." => {
-                            // Check context for periods
-                            if i > 0 {
-                                let prev_token = &tokens[i-1];
-                                if prev_token.text == "example" && i < tokens.len() - 1 && tokens[i+1].text == "com" {
-                                    tokens[i] = Token::new(
-                                        "period".to_string(),
-                                        TokenType::Word,
-                                        token.position,
-                                    );
-                                } else if prev_token.text == "Dr" || prev_token.text == "St" ||
-                                         prev_token.text == "Mr" || prev_token.text == "Mrs" ||
-                                         prev_token.text == "Ms" || prev_token.text == "Prof" {
-                                    // This is a period after an abbreviation, keep it for now
-                                    // It will be handled with the abbreviation expansion
+                    // Check for leading decimal points
+                    if token.text.starts_with('.') && token.text.len() > 1 && 
+                       token.text[1..].chars().all(|c| c.is_numeric()) {
+                        // This is a leading decimal like ".5"
+                        // Convert to "0.5" and process as a decimal
+                        let fixed_decimal = format!("0{}", token.text);
+                        if let Ok(number) = fixed_decimal.parse::<f64>() {
+                            tokens[i] = Token::new(
+                                self.number_converter.convert_decimal(number),
+                                TokenType::Word,
+                                token.position,
+                            );
+                        }
+                    } else {
+                        // Handle special cases for punctuation
+                        match token.text.as_str() {
+                            "." => {
+                                // Check context for periods
+                                if i > 0 {
+                                    let prev_token = &tokens[i-1];
+                                    if prev_token.text == "example" && i < tokens.len() - 1 && tokens[i+1].text == "com" {
+                                        tokens[i] = Token::new(
+                                            "period".to_string(),
+                                            TokenType::Word,
+                                            token.position,
+                                        );
+                                    } else if prev_token.text == "Dr" || prev_token.text == "St" ||
+                                             prev_token.text == "Mr" || prev_token.text == "Mrs" ||
+                                             prev_token.text == "Ms" || prev_token.text == "Prof" {
+                                        // This is a period after an abbreviation, keep it for now
+                                        // It will be handled with the abbreviation expansion
+                                    }
                                 }
-                            }
-                        },
-                        _ => {
-                            // Keep other punctuation as is
-                        },
+                            },
+                            _ => {
+                                // Keep other punctuation as is
+                            },
+                        }
                     }
                 },
                 TokenType::Word => {

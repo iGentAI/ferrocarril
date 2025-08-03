@@ -7,8 +7,7 @@ use std::error::Error;
 use std::path::Path;
 use std::fs;
 use ferrocarril_core::tensor::Tensor;
-use ferrocarril_nn::bert::Bert;
-use ferrocarril_nn::bert::transformer::BertConfig;
+use ferrocarril_nn::bert::{CustomAlbert, CustomAlbertConfig};
 use ferrocarril_nn::Forward;
 use serde_json::Value;
 
@@ -78,17 +77,16 @@ fn main() -> Result<(), Box<dyn Error>> {
     let num_attention_heads = config["plbert"]["num_attention_heads"].as_u64().unwrap_or(12) as usize;
     let num_hidden_layers = config["plbert"]["num_hidden_layers"].as_u64().unwrap_or(12) as usize;
     let intermediate_size = config["plbert"]["intermediate_size"].as_u64().unwrap_or(3072) as usize;
-    let dropout = config["dropout"].as_f64().unwrap_or(0.1) as f32;
     
     // Create BERT config
-    let bert_config = BertConfig {
+    let bert_config = CustomAlbertConfig {
         vocab_size,
+        embedding_size, // Use actual embedding size from metadata
         hidden_size,
         num_attention_heads,
         num_hidden_layers,
         intermediate_size,
         max_position_embeddings: 512, // Default value
-        dropout_prob: dropout,
     };
     
     println!("Created BERT config: vocab_size={}, hidden_size={}, num_heads={}, num_layers={}",
@@ -97,8 +95,8 @@ fn main() -> Result<(), Box<dyn Error>> {
             bert_config.num_attention_heads,
             bert_config.num_hidden_layers);
     
-    // Initialize CustomBERT
-    let bert = Bert::new(bert_config);
+    // Initialize CustomAlbert
+    let bert = CustomAlbert::new(bert_config);
     
     // Define the weight directory
     let weights_dir = Path::new("/home/sandbox/ferrocarril_weights/model/bert");
@@ -161,7 +159,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     // Create a dummy input tensor to test forward pass
     println!("\nRunning forward pass with uninitialized model...");
     let input_ids = Tensor::from_data(vec![0, 1, 2, 3, 0], vec![1, 5]);
-    let output = bert.forward(&input_ids, None, None);
+    let output = bert.forward(&input_ids, None);
     
     println!("Forward pass output shape: {:?}", output.shape());
     println!("Forward pass first few values: {:?}", &output.data()[0..std::cmp::min(8, output.data().len())]);
