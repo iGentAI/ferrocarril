@@ -1,0 +1,222 @@
+{
+  "foundation_valid": true,
+  "reference_outputs": {
+    "layer_1_g2p": {
+      "phonemes": "h \u025b l o\u028a \u028a w \u025d r l d",
+      "token_ids": [
+        0,
+        50,
+        86,
+        54,
+        57,
+        135,
+        65,
+        85,
+        60,
+        54,
+        46,
+        0
+      ],
+      "shape": [
+        1,
+        12
+      ],
+      "description": "G2P: Text \u2192 Phonemes \u2192 Tokens"
+    },
+    "layer_2_bert": {
+      "shape": [
+        1,
+        12,
+        768
+      ],
+      "mean": 0.0009633463341742754,
+      "std": 0.5631288886070251,
+      "min": -11.593462944030762,
+      "max": 1.490004301071167,
+      "description": "BERT: Tokens \u2192 Contextual embeddings [B,T,768]"
+    },
+    "layer_3_projection": {
+      "shape": [
+        1,
+        512,
+        12
+      ],
+      "mean": -0.019283635541796684,
+      "std": 1.1051764488220215,
+      "description": "Projection: BERT [768] \u2192 Hidden [512], transpose to [B,C,T]"
+    },
+    "layer_4_duration": {
+      "duration_logits_shape": [
+        1,
+        12,
+        50
+      ],
+      "predicted_durations": [
+        7,
+        8,
+        4,
+        3,
+        4,
+        4,
+        6,
+        8,
+        8,
+        8,
+        11,
+        26
+      ],
+      "total_frames": 97,
+      "description": "Duration: Hidden features \u2192 frame durations"
+    },
+    "layer_5_energy_pooling": {
+      "alignment_shape": [
+        1,
+        12,
+        97
+      ],
+      "energy_shape": [
+        1,
+        640,
+        97
+      ],
+      "mean": -0.021626431494951248,
+      "description": "Energy pooling: Apply duration alignment to features"
+    },
+    "layer_6_f0_noise": {
+      "f0_shape": [
+        1,
+        194
+      ],
+      "noise_shape": [
+        1,
+        194
+      ],
+      "f0_mean": 146.29286193847656,
+      "f0_std": 45.7127799987793,
+      "noise_mean": -0.8072887063026428,
+      "description": "F0/Noise: Energy \u2192 prosodic features"
+    },
+    "layer_7_text_encoder": {
+      "shape": [
+        1,
+        512,
+        12
+      ],
+      "mean": -0.05391358211636543,
+      "std": 0.3326382339000702,
+      "description": "TextEncoder: Tokens \u2192 phoneme features [B,C,T]"
+    },
+    "layer_8_asr": {
+      "shape": [
+        1,
+        512,
+        97
+      ],
+      "mean": -0.04838883876800537,
+      "description": "ASR: TextEncoder features @ alignment matrix"
+    },
+    "layer_9_decoder": {
+      "shape": [
+        1,
+        1,
+        58200
+      ],
+      "mean": -0.0007656944799236953,
+      "std": 0.012827555648982525,
+      "sample_count": 58200,
+      "description": "Decoder: Features + F0 + Noise \u2192 Audio waveform"
+    }
+  },
+  "validation_framework": {
+    "layers": [
+      {
+        "layer_num": 1,
+        "name": "G2P_Conversion",
+        "input": "Text string",
+        "output": "Token sequence [B, T]",
+        "validation_type": "exact_match",
+        "tolerance": 0.0
+      },
+      {
+        "layer_num": 2,
+        "name": "CustomBERT",
+        "input": "Tokens [B, T]",
+        "output": "Embeddings [B, T, 768]",
+        "validation_type": "numerical_accuracy",
+        "tolerance": 0.0001
+      },
+      {
+        "layer_num": 3,
+        "name": "BERT_Projection",
+        "input": "BERT embeddings [B, T, 768]",
+        "output": "Hidden features [B, C, T] where C=512",
+        "validation_type": "numerical_accuracy",
+        "tolerance": 0.0001
+      },
+      {
+        "layer_num": 4,
+        "name": "Duration_Prediction",
+        "input": "Hidden features [B, C, T]",
+        "output": "Duration logits [B, T, max_dur], durations [T]",
+        "validation_type": "statistical_similarity",
+        "tolerance": 0.01
+      },
+      {
+        "layer_num": 5,
+        "name": "Energy_Pooling",
+        "input": "Features + alignment matrix",
+        "output": "Frame-aligned features [B, C, F]",
+        "validation_type": "numerical_accuracy",
+        "tolerance": 0.0001
+      },
+      {
+        "layer_num": 6,
+        "name": "F0_Noise_Prediction",
+        "input": "Aligned features [B, C, F]",
+        "output": "F0 curve [B, F], Noise [B, F]",
+        "validation_type": "statistical_similarity",
+        "tolerance": 0.01
+      },
+      {
+        "layer_num": 7,
+        "name": "TextEncoder",
+        "input": "Tokens [B, T]",
+        "output": "Phoneme features [B, C, T]",
+        "validation_type": "numerical_accuracy",
+        "tolerance": 0.0001
+      },
+      {
+        "layer_num": 8,
+        "name": "ASR_Alignment",
+        "input": "TextEncoder features + alignment",
+        "output": "Frame-aligned ASR [B, C, F]",
+        "validation_type": "numerical_accuracy",
+        "tolerance": 0.0001
+      },
+      {
+        "layer_num": 9,
+        "name": "Decoder_Audio",
+        "input": "ASR + F0 + Noise + Voice",
+        "output": "Audio waveform [B, samples]",
+        "validation_type": "audio_quality",
+        "tolerance": 0.01
+      }
+    ],
+    "test_cases": [
+      {
+        "text": "Hello world",
+        "expected_tokens": 10,
+        "voice": "af_heart",
+        "speed": 1.0
+      },
+      {
+        "text": "This is a test",
+        "expected_tokens": 15,
+        "voice": "af_heart",
+        "speed": 1.0
+      }
+    ]
+  },
+  "timestamp": "2025-08-04 22:38:06",
+  "status": "READY_FOR_RUST_VALIDATION"
+}

@@ -1,11 +1,9 @@
-//! Prosody predictor (duration, F0, noise) – Rust port of kokoro implementation with STRICT VALIDATION
+//! Prosody predictor using ONLY specialized implementations
 
-use crate::{
-    lstm::LSTM,
-    linear::Linear,
-    conv::Conv1d,
-    Forward,
-};
+use crate::lstm_variants::ProsodyLSTM;  // Specialized LSTM only
+use crate::linear_variants::ProjectionLinear; // Specialized Linear only
+use crate::conv1d_variants::PredictorConv1d;  // Specialized Conv1d only
+use crate::Forward;
 use ferrocarril_core::tensor::Tensor;
 use ferrocarril_core::FerroError;
 #[cfg(feature = "weights")]
@@ -53,17 +51,17 @@ mod resblk1d;
 use duration_encoder::DurationEncoder;
 use resblk1d::AdainResBlk1d;
 
-/// Main prosody predictor with STRICT tensor shape validation
+/// Main prosody predictor with specialized implementations only
 pub struct ProsodyPredictor {
     // sub-modules
     pub(crate) txt_enc: DurationEncoder,
-    pub(crate) dur_lstm: LSTM,
-    pub(crate) dur_proj: Linear,
-    pub(crate) shared_lstm: LSTM,
+    pub(crate) dur_lstm: ProsodyLSTM,        // Specialized for duration prediction
+    pub(crate) dur_proj: ProjectionLinear,   // Specialized duration projection
+    pub(crate) shared_lstm: ProsodyLSTM,     // Specialized for F0/noise prediction
     pub(crate) f0_blocks: Vec<AdainResBlk1d>,
     pub(crate) noise_blocks: Vec<AdainResBlk1d>,
-    pub(crate) f0_proj: Conv1d,
-    pub(crate) noise_proj: Conv1d,
+    pub(crate) f0_proj: PredictorConv1d,     // Specialized F0 projection
+    pub(crate) noise_proj: PredictorConv1d,  // Specialized noise projection
     
     // configuration
     pub max_dur: usize,
@@ -77,19 +75,17 @@ impl ProsodyPredictor {
 
         let txt_enc = DurationEncoder::new(style_dim, d_hid, n_layers, dropout);
 
-        // bidirectional = true doubles the hidden size
-        // we feed d_hid+style_dim in and get d_hid out (fw + bw)
-        let dur_lstm = LSTM::new(d_hid + style_dim,
-                                  d_hid / 2, /*hidden*/
-                                  1, /*layers*/
-                                  true,/*batch_first*/
-                                  true /*bidir*/);
+        // Specialized ProsodyLSTMs for 640→512 processing
+        let dur_lstm = ProsodyLSTM::new(d_hid + style_dim, d_hid / 2);
+        let shared_lstm = ProsodyLSTM::new(d_hid + style_dim, d_hid / 2);
 
-        let dur_proj = Linear::new(d_hid, max_dur, true);
-
-        let shared_lstm = LSTM::new(d_hid + style_dim,
-                                    d_hid / 2,
-                                    1, true, true);
+        // Specialized duration projection
+        let dur_proj = ProjectionLinear::new(
+            d_hid, 
+            max_dur, 
+            true, 
+            crate::linear_variants::ProjectionType::DurationOut
+        );
 
         // F0 / Noise residual towers
         let mut f0_blocks = Vec::new();
@@ -102,8 +98,9 @@ impl ProsodyPredictor {
         noise_blocks.push(AdainResBlk1d::new(d_hid, d_hid / 2, style_dim, true, dropout));
         noise_blocks.push(AdainResBlk1d::new(d_hid / 2, d_hid / 2, style_dim, false, dropout));
 
-        let f0_proj = Conv1d::new(d_hid / 2, 1, 1, 1, 0, 1, 1, true);
-        let noise_proj = Conv1d::new(d_hid / 2, 1, 1, 1, 0, 1, 1, true);
+        // Specialized Conv1d projections
+        let f0_proj = PredictorConv1d::new(d_hid / 2, 1, 1);
+        let noise_proj = PredictorConv1d::new(d_hid / 2, 1, 1);
 
         Self {
             txt_enc, dur_lstm, dur_proj, shared_lstm,
@@ -112,7 +109,7 @@ impl ProsodyPredictor {
         }
     }
 
-    /// Forward pass that returns duration logits and encoded hidden sequence
+    /// Forward pass with specialized LSTMs
     /// 
     /// FIXED TENSOR SHAPE FLOW (STRICT VALIDATION):
     /// - txt_feat: [B, C, T] → DurationEncoder → [B, T, d_model] (NOT C+style_dim)
@@ -155,12 +152,11 @@ impl ProsodyPredictor {
         assert_eq!(alignment.shape()[0], seq_len,
             "STRICT: Alignment input time {} != txt_feat time {}", alignment.shape()[0], seq_len);
 
-        // 1) Duration encoder processing - STRICT INPUT AND OUTPUT VALIDATION
+        // 1) Duration encoder processing
         println!("🔍 ProsodyPredictor calling DurationEncoder with STRICT validation...");
         let d_enc = self.txt_enc.forward(txt_feat, style, text_mask);
 
         // STRICT: Validate DurationEncoder output - MUST be [B, T, d_model] per PyTorch
-        // NO STYLE CHANNELS should remain in DurationEncoder output
         let expected_d_enc_shape = vec![batch_size, seq_len, self.d_model];
         assert_eq!(d_enc.shape(), expected_d_enc_shape,
             "CRITICAL: DurationEncoder returned WRONG shape: expected {:?} [B,T,d_model], got {:?}. \
@@ -170,7 +166,6 @@ impl ProsodyPredictor {
         println!("✅ DurationEncoder output STRICTLY validated: {:?} [B,T,d_model] - no style channels", d_enc.shape());
         
         // 2) Duration LSTM processing - ADD STYLE BACK FOR LSTM INPUT
-        // Since DurationEncoder correctly drops style, we must re-add it for dur_lstm
         // Expand style to match sequence length: [B, style_dim] → [B, T, style_dim]
         let mut style_expanded = vec![0.0; batch_size * seq_len * self.style_dim];
         for b in 0..batch_size {
@@ -210,8 +205,11 @@ impl ProsodyPredictor {
         
         println!("✅ Duration LSTM input STRICTLY validated: {:?} [B,T,d_model+style=640]", dur_lstm_input_tensor.shape());
         
-        // Now dur_lstm gets the correct [B,T,d_model+style_dim] input - NO MORE "expected 640, got 133"
-        let (dur_out, _) = self.dur_lstm.forward_batch_first(&dur_lstm_input_tensor, None, None);
+        // Create input_lengths from actual sequence lengths  
+        let input_lengths = vec![seq_len; batch_size]; // For now use full length, could be optimized
+        
+        // Use specialized ProsodyLSTM
+        let (dur_out, _) = self.dur_lstm.forward_batch_first_with_lengths(&dur_lstm_input_tensor, &input_lengths, None, None);
         
         // STRICT: Validate LSTM output shape
         assert_eq!(dur_out.shape(), &[batch_size, seq_len, self.d_model],
@@ -230,7 +228,6 @@ impl ProsodyPredictor {
         println!("✅ Duration projection output: {:?} [B,T,max_dur]", dur_logits.shape());
 
         // 4) Energy pooling - USE d_enc WITH STYLE RE-ADDED FOR POOLING
-        // PyTorch pools from tensor that has style - we use the LSTM input tensor that has both
         let d_enc_with_style = dur_lstm_input_tensor.clone(); // [B,T,d_model+style_dim] 
         
         let d_transposed = self.transpose_btc_to_bct_strict(&d_enc_with_style)?;
@@ -256,10 +253,7 @@ impl ProsodyPredictor {
         Ok((dur_logits, en))
     }
 
-    /// Predict F0 and noise from encoded features and style - FIXED VERSION
-    /// 
-    /// TENSOR FLOW (STRICT):
-    /// - en: [B, C+style, F] → Transpose → [B, F, C+style] → LSTM → [B, F, C] → F0/Noise blocks
+    /// Predict F0 and noise from encoded features and style using specialized shared LSTM
     pub fn predict_f0_noise(&self, en: &Tensor<f32>, style: &Tensor<f32>)
         -> Result<(Tensor<f32>, Tensor<f32>), FerroError> {
     
@@ -277,22 +271,24 @@ impl ProsodyPredictor {
         assert_eq!(style.shape()[1], self.style_dim,
             "STRICT: Style dimension {} != expected {}", style.shape()[1], self.style_dim);
 
-        // Convert from [B, C+style, F] to [B, F, C+style] for LSTM processing
-        // This matches Kokoro's x.transpose(-1, -2) operation
+        // Convert from [B, C, F] to [B, F, C] for LSTM processing
         let en_bfc = self.transpose_bcf_to_bfc_strict(en)?;
 
         // STRICT: Validate transpose result
         assert_eq!(en_bfc.shape(), &[batch_size, frames, channels],
             "STRICT: Transpose BCF→BFC failed");
 
-        // Process through shared LSTM (matches Kokoro's shared(x.transpose(-1, -2)))
-        let (shared_out, _) = self.shared_lstm.forward_batch_first(&en_bfc, None, None);
+        // Create input_lengths for LSTM processing
+        let input_lengths = vec![frames; batch_size];
+
+        // Process through specialized shared LSTM (FIXED METHOD CALL)
+        let (shared_out, _) = self.shared_lstm.forward_batch_first_with_lengths(&en_bfc, &input_lengths, None, None);
         
         // STRICT: Validate LSTM output
         assert_eq!(shared_out.shape(), &[batch_size, frames, self.d_model],
             "STRICT: Shared LSTM output shape mismatch");
 
-        // Convert back to [B, C, F] for F0/noise blocks (matches x.transpose(-1, -2))
+        // Convert back to [B, C, F] for F0/noise blocks
         let shared_bct = self.transpose_bfc_to_bcf_strict(&shared_out)?;
 
         // F0 prediction branch
@@ -475,48 +471,27 @@ impl LoadWeightsBinary for ProsodyPredictor {
         component: &str,
         prefix: &str
     ) -> Result<(), FerroError> {
-        println!("Loading ProsodyPredictor weights for {}.{}", component, prefix);
+        // Load only specialized implementations
+        self.txt_enc.load_weights_binary(loader, component, &format!("{}.text_encoder", prefix))?;
+        self.dur_lstm.load_weights_binary(loader, component, &format!("{}.lstm", prefix))?;
+        self.shared_lstm.load_weights_binary(loader, component, &format!("{}.shared", prefix))?;
         
-        // STRICT: Load Duration Encoder weights - fail immediately if missing
-        self.txt_enc.load_weights_binary(loader, component, &format!("{}.text_encoder", prefix))
-            .map_err(|e| FerroError::new(format!("CRITICAL: DurationEncoder loading failed: {}", e)))?;
+        // Load specialized duration projection  
+        self.dur_proj.load_weights_binary(loader, component, &format!("{}.duration_proj.linear_layer", prefix))?;
         
-        // STRICT: Load LSTM weights with bidirectional support
-        self.dur_lstm.load_weights_binary(loader, component, &format!("{}.lstm", prefix))
-            .map_err(|e| FerroError::new(format!("CRITICAL: Duration LSTM loading failed: {}", e)))?;
-        
-        self.shared_lstm.load_weights_binary(loader, component, &format!("{}.shared", prefix))
-            .map_err(|e| FerroError::new(format!("CRITICAL: Shared LSTM loading failed: {}", e)))?;
-        
-        // STRICT: Load Linear projection - fail if missing
-        self.dur_proj.load_weights_binary(loader, component, &format!("{}.duration_proj.linear_layer", prefix))
-            .map_err(|e| FerroError::new(format!("CRITICAL: Duration projection loading failed: {}", e)))?;
-        
-        // STRICT: Load F0 blocks - fail if any missing
+        // Load F0/noise blocks and specialized projections
         for i in 0..self.f0_blocks.len() {
-            let f0_block_prefix = format!("{}.F0.{}", prefix, i);
-            self.f0_blocks.get_mut(i)
-                .ok_or_else(|| FerroError::new(format!("STRICT: F0 block {} not found", i)))?
-                .load_weights_binary(loader, component, &f0_block_prefix)
-                .map_err(|e| FerroError::new(format!("CRITICAL: F0 block {} loading failed: {}", i, e)))?;
+            self.f0_blocks[i].load_weights_binary(loader, component, &format!("{}.F0.{}", prefix, i))?;
         }
         
-        // STRICT: Load Noise blocks - fail if any missing  
         for i in 0..self.noise_blocks.len() {
-            let noise_block_prefix = format!("{}.N.{}", prefix, i);
-            self.noise_blocks.get_mut(i)
-                .ok_or_else(|| FerroError::new(format!("STRICT: Noise block {} not found", i)))?
-                .load_weights_binary(loader, component, &noise_block_prefix)
-                .map_err(|e| FerroError::new(format!("CRITICAL: Noise block {} loading failed: {}", i, e)))?;
+            self.noise_blocks[i].load_weights_binary(loader, component, &format!("{}.N.{}", prefix, i))?;
         }
         
-        // STRICT: Load Conv1d projections - fail if missing
-        self.f0_proj.load_weights_binary(loader, component, &format!("{}.F0_proj", prefix))
-            .map_err(|e| FerroError::new(format!("CRITICAL: F0 projection loading failed: {}", e)))?;
-        self.noise_proj.load_weights_binary(loader, component, &format!("{}.N_proj", prefix))
-            .map_err(|e| FerroError::new(format!("CRITICAL: Noise projection loading failed: {}", e)))?;
+        self.f0_proj.load_weights_binary(loader, component, &format!("{}.F0_proj", prefix))?;
+        self.noise_proj.load_weights_binary(loader, component, &format!("{}.N_proj", prefix))?;
         
-        println!("✅ ProsodyPredictor: All 122 weight tensors loaded successfully with STRICT validation");
+        println!("✅ ProsodyPredictor: All specialized implementations loaded");
         Ok(())
     }
 }

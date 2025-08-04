@@ -6,20 +6,12 @@ authors = ["Ferrocarril Developers"]
 description = "Pure Rust TTS inference engine"
 license = "MIT"
 
-[workspace]
-members = [
-    "ferrocarril-core",
-    "ferrocarril-dsp",
-    "ferrocarril-nn"
-    # Removed redundant ferrocarril-g2p-adapter
-]
-
 [features]
 default = ["weights"]
 weights = ["ferrocarril-core/weights"]
 
 [dependencies]
-ferrocarril-core = { path = "ferrocarril-core" }
+ferrocarril-core = { path = "../ferrocarril-core" }
 ferrocarril-dsp = { path = "ferrocarril-dsp" }
 ferrocarril-nn = { path = "ferrocarril-nn" }
 phonesis = { path = "../phonesis", features = ["english"] }

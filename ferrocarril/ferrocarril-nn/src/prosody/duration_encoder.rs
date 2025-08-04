@@ -1,7 +1,7 @@
 //! Duration encoder (= several bi-LSTM + AdaLayerNorm blocks)
 
+use crate::lstm_variants::DurationEncoderLSTM;
 use crate::{
-    lstm::LSTM,
     linear::Linear,
     Forward,
 };
@@ -175,7 +175,7 @@ pub struct DurationEncoder {
 }
 
 enum Block {
-    Rnn(LSTM),
+    Rnn(DurationEncoderLSTM),
     Ada(AdaLayerNorm),
 }
 
@@ -193,10 +193,10 @@ impl DurationEncoder {
         let actual_layers = n_layers.min(3); // Never create more than 3 layers (what's in the weights)
         
         for _layer_idx in 0..actual_layers {
-            blocks.push(Block::Rnn(LSTM::new(d_model + style_dim,
-                                             d_model / 2,
-                                             1, /*batch_first*/ true,
-                                             true /*bidir*/)));
+            blocks.push(Block::Rnn(DurationEncoderLSTM::new(
+                d_model + style_dim,
+                d_model / 2,
+            )));
             
             blocks.push(Block::Ada(AdaLayerNorm::new(style_dim, d_model)));
         }
@@ -503,7 +503,6 @@ impl DurationEncoder {
         Tensor::from_data(padded, vec![b, c, target_length])
     }
     
-    /// Load weights from a binary weight loader
     #[cfg(feature = "weights")]
     pub fn load_weights_binary(
         &mut self,
@@ -513,14 +512,7 @@ impl DurationEncoder {
     ) -> Result<(), FerroError> {
         println!("Loading DurationEncoder weights for {}.{}", component, prefix);
         
-        // Log how many blocks we're trying to load
-        let total_blocks = self.blocks.len();
-        println!("DurationEncoder has {} blocks to load", total_blocks);
-        
-        // Loop through blocks and load weights for each
         for (i, blk) in self.blocks.iter_mut().enumerate() {
-            // Skip loading blocks beyond what the model actually has
-            // Kokoro model has 3 LSTM pairs (6 blocks total, indices 0-5)
             if i >= 6 {
                 println!("Skipping block {} as it exceeds the available weights in Kokoro model", i);
                 continue;
@@ -528,55 +520,25 @@ impl DurationEncoder {
             
             match blk {
                 Block::Rnn(lstm) => {
-                    // DurationEncoder has alternating LSTM+AdaLayerNorm pattern
-                    // Block 0: LSTM, Block 1: AdaLayerNorm, Block 2: LSTM, Block 3: AdaLayerNorm
-                    // LSTM blocks are at indices 0, 2, 4 (even indices only)
-                    // PyTorch lstms array: [LSTM0, AdaLayerNorm0, LSTM1, AdaLayerNorm1, LSTM2, AdaLayerNorm2]
+                    let lstm_prefix = format!("{}.lstms.{}", prefix, i);
                     
-                    let lstm_index = i; // Direct mapping to PyTorch lstms array
-                    let lstm_prefix = format!("{}.lstms.{}", prefix, lstm_index);
-                    
-                    println!("Loading LSTM weights for block {} from {}.lstms.{}", i, prefix, lstm_index);
-                    
-                    // ALL DurationEncoder LSTMs are bidirectional and use stacked weight format
-                    // Load using the corrected bidirectional stacked weight method
-                    if let Err(e) = lstm.load_weights_binary_with_reverse(
-                        loader, 
-                        component, 
-                        &lstm_prefix,
-                        false // Always load as forward (stacked weight format handles bidirectional)
-                    ) {
-                        println!("Warning: Could not load LSTM weights for block {}. Error: {}", i, e);
-                        println!("Using default random weights instead.");
-                        // Continue with default random weights
-                    } else {
-                        println!("Successfully loaded LSTM weights for block {}", i);
-                    }
+                    lstm.load_weights_binary(loader, component, &lstm_prefix)
+                        .map_err(|e| FerroError::new(format!("CRITICAL: DurationEncoderLSTM block {} failed: {}", i, e)))?;
+                        
+                    println!("Successfully loaded specialized DurationEncoderLSTM for block {}", i);
                 },
                 Block::Ada(adaln) => {
-                    // AdaLayerNorm blocks at indices 1, 3, 5 (odd indices)
-                    let fc_index = i; // Direct mapping to PyTorch lstms array
-                    let fc_prefix = format!("{}.lstms.{}", prefix, fc_index);
+                    let fc_prefix = format!("{}.lstms.{}", prefix, i);
                     
-                    println!("Loading AdaLayerNorm weights for block {} from {}.lstms.{}", i, prefix, fc_index);
-                    
-                    // Try to load AdaLayerNorm weights, but don't fail if not found
-                    if let Err(e) = adaln.load_weights_binary(
-                        loader, 
-                        component, 
-                        &fc_prefix
-                    ) {
-                        println!("Warning: Could not load AdaLayerNorm weights for block {}. Error: {}", i, e);
-                        println!("Using default random weights instead.");
-                        // Continue with default random weights
-                    } else {
-                        println!("Successfully loaded AdaLayerNorm weights for block {}", i);
-                    }
+                    adaln.load_weights_binary(loader, component, &fc_prefix)
+                        .map_err(|e| FerroError::new(format!("CRITICAL: AdaLayerNorm block {} failed: {}", i, e)))?;
+                        
+                    println!("Successfully loaded AdaLayerNorm for block {}", i);
                 },
             }
         }
         
-        // Always return success - we've handled errors at the component level
+        println!("✅ DurationEncoder: All specialized LSTM variants loaded successfully");
         Ok(())
     }
 }

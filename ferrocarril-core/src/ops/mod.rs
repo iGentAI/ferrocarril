@@ -8,7 +8,7 @@ pub use matmul::{matmul, batch_matmul, matmul_3d_2d, matmul_2d_3d};
 use crate::tensor::Tensor;
 
 /// Element-wise addition
-pub fn add<T: Clone + std::ops::Add<Output = T>>(a: &Tensor<T>, b: &Tensor<T>) -> Tensor<T> {
+pub fn add<T: Clone + std::ops::Add<Output = T> + Default>(a: &Tensor<T>, b: &Tensor<T>) -> Tensor<T> {
     assert_eq!(a.shape(), b.shape(), "Shapes must match for addition");
     
     let data: Vec<T> = a.data()
@@ -21,7 +21,7 @@ pub fn add<T: Clone + std::ops::Add<Output = T>>(a: &Tensor<T>, b: &Tensor<T>) -
 }
 
 /// Element-wise multiplication
-pub fn mul<T: Clone + std::ops::Mul<Output = T>>(a: &Tensor<T>, b: &Tensor<T>) -> Tensor<T> {
+pub fn mul<T: Clone + std::ops::Mul<Output = T> + Default>(a: &Tensor<T>, b: &Tensor<T>) -> Tensor<T> {
     assert_eq!(a.shape(), b.shape(), "Shapes must match for multiplication");
     
     let data: Vec<T> = a.data()
@@ -34,7 +34,7 @@ pub fn mul<T: Clone + std::ops::Mul<Output = T>>(a: &Tensor<T>, b: &Tensor<T>) -
 }
 
 /// Transpose a 2D tensor
-pub fn transpose<T: Clone>(tensor: &Tensor<T>) -> Tensor<T> {
+pub fn transpose<T: Clone + Default>(tensor: &Tensor<T>) -> Tensor<T> {
     assert_eq!(tensor.shape().len(), 2, "Can only transpose 2D tensors");
     
     let (rows, cols) = (tensor.shape()[0], tensor.shape()[1]);

@@ -1,0 +1,309 @@
+warning: unused variable: `value_idx`
+  --> src/dictionary/trie.rs:68:13
+   |
+68 |         let value_idx = match self.nodes[node_idx].value {
+   |             ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_value_idx`
+   |
+   = note: `#[warn(unused_variables)]` on by default
+
+warning: unused variable: `rule_engine`
+   --> src/english/rules.rs:158:21
+    |
+158 | fn add_stress_rules(rule_engine: &mut RuleEngine) {
+    |                     ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_rule_engine`
+
+warning: unused variable: `context`
+   --> src/english/mod.rs:368:48
+    |
+368 | ...ntext(&self, text: &str, context: &Context) -> Result<Vec<Phoneme>> {
+    |                             ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_context`
+
+warning: type `Node` is more private than the item `CompactTrie::raw_data`
+   --> src/dictionary/trie.rs:138:5
+    |
+138 |     pub(crate) fn raw_data(&self) -> (&[Node], &[PhonemeSequence]) {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ method `CompactTrie::raw_data` is reachable at visibility `pub(crate)`
+    |
+note: but type `Node` is only usable at visibility `pub(self)`
+   --> src/dictionary/trie.rs:10:1
+    |
+10  | struct Node {
+    | ^^^^^^^^^^^
+    = note: `#[warn(private_interfaces)]` on by default
+
+warning: type `Node` is more private than the item `CompactTrie::from_raw`
+   --> src/dictionary/trie.rs:143:5
+    |
+143 |     pub(crate) fn from_raw(nodes: Vec<Node>, values: Vec<PhonemeSequence>) -> Sel...
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ associated function `CompactTrie::from_raw` is reachable at visibility `pub(crate)`
+    |
+note: but type `Node` is only usable at visibility `pub(self)`
+   --> src/dictionary/trie.rs:10:1
+    |
+10  | struct Node {
+    | ^^^^^^^^^^^
+
+warning: field `join_with_spaces` is never read
+  --> src/ferrocarril_adapter.rs:32:5
+   |
+21 | pub struct FerrocarrilG2PAdapter {
+   |            --------------------- field in this struct
+...
+32 |     join_with_spaces: bool,
+   |     ^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` on by default
+
+warning: associated items `raw_data` and `from_raw` are never used
+   --> src/dictionary/trie.rs:138:19
+    |
+37  | impl CompactTrie {
+    | ---------------- associated items in this implementation
+...
+138 |     pub(crate) fn raw_data(&self) -> (&[Node], &[PhonemeSequence]) {
+    |                   ^^^^^^^^
+...
+143 |     pub(crate) fn from_raw(nodes: Vec<Node>, values: Vec<PhonemeSequenc...
+    |                   ^^^^^^^^
+
+warning: struct `CompactPhoneme` is never constructed
+  --> src/dictionary/compact.rs:16:19
+   |
+16 | pub(crate) struct CompactPhoneme(pub(crate) u8);
+   |                   ^^^^^^^^^^^^^^
+
+warning: associated items `new`, `phoneme_index`, and `stress` are never used
+  --> src/dictionary/compact.rs:20:12
+   |
+18 | impl CompactPhoneme {
+   | ------------------- associated items in this implementation
+19 |     /// Create a new compact phoneme.
+20 |     pub fn new(phoneme_index: u8, stress: Option<StressLevel>) -> Self {
+   |            ^^^
+...
+36 |     pub fn phoneme_index(&self) -> u8 {
+   |            ^^^^^^^^^^^^^
+...
+41 |     pub fn stress(&self) -> Option<StressLevel> {
+   |            ^^^^^^
+
+warning: struct `CompactPhonemeSequence` is never constructed
+  --> src/dictionary/compact.rs:57:19
+   |
+57 | pub(crate) struct CompactPhonemeSequence {
+   |                   ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: fields `children_offset`, `children_count`, and `value_index` are never read
+  --> src/dictionary/compact.rs:73:16
+   |
+71 | pub(crate) struct CompactNode {
+   |                   ----------- fields in this struct
+72 |     /// Offset to first child in children array
+73 |     pub(crate) children_offset: u32,
+   |                ^^^^^^^^^^^^^^^
+...
+76 |     pub(crate) children_count: u16,
+   |                ^^^^^^^^^^^^^^
+...
+79 |     pub(crate) value_index: Option<u32>,
+   |                ^^^^^^^^^^^
+   |
+   = note: `CompactNode` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: struct `ChildEntry` is never constructed
+  --> src/dictionary/compact.rs:86:19
+   |
+86 | pub(crate) struct ChildEntry {
+   |                   ^^^^^^^^^^
+
+warning: struct `CompactTrieStorage` is never constructed
+  --> src/dictionary/compact.rs:99:19
+   |
+99 | pub(crate) struct CompactTrieStorage {
+   |                   ^^^^^^^^^^^^^^^^^^
+
+warning: struct `CompactValue` is never constructed
+   --> src/dictionary/compact.rs:120:19
+    |
+120 | pub(crate) struct CompactValue {
+    |                   ^^^^^^^^^^^^
+
+warning: associated items `new`, `to_phoneme_sequence`, `memory_usage`, `to_bytes`, and `from_bytes` are never used
+   --> src/dictionary/compact.rs:127:12
+    |
+125 | impl CompactPhonemeSequence {
+    | --------------------------- associated items in this implementation
+126 |     /// Create a new compact phoneme sequence.
+127 |     pub fn new(phoneme_sequence: &PhonemeSequence) -> Result<Self> {
+    |            ^^^
+...
+150 |     pub fn to_phoneme_sequence(&self) -> Result<PhonemeSequence> {
+    |            ^^^^^^^^^^^^^^^^^^^
+...
+162 |     pub fn memory_usage(&self) -> usize {
+    |            ^^^^^^^^^^^^
+...
+170 |     pub fn to_bytes(&self) -> Vec<u8> {
+    |            ^^^^^^^^
+...
+198 |     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
+    |            ^^^^^^^^^^
+
+warning: associated items `from_phoneme` and `to_phoneme` are never used
+   --> src/dictionary/compact.rs:251:12
+    |
+249 | impl CompactPhoneme {
+    | ------------------- associated items in this implementation
+250 |     /// Convert a phoneme to compact representation.
+251 |     pub fn from_phoneme(phoneme: &Phoneme) -> Result<Self> {
+    |            ^^^^^^^^^^^^
+...
+310 |     pub fn to_phoneme(&self, standard: PhonemeStandard) -> Result<Phone...
+    |            ^^^^^^^^^^
+
+warning: associated items `new`, `add_string`, `get_string`, `add_child`, `add_value`, and `memory_usage` are never used
+   --> src/dictionary/compact.rs:393:12
+    |
+391 | impl CompactTrieStorage {
+    | ----------------------- associated items in this implementation
+392 |     /// Create a new empty compact trie storage.
+393 |     pub fn new() -> Self {
+    |            ^^^
+...
+404 |     pub fn add_string(&mut self, s: &str) -> u32 {
+    |            ^^^^^^^^^^
+...
+416 |     pub fn get_string(&self, index: u32) -> Result<&str> {
+    |            ^^^^^^^^^^
+...
+444 |     pub fn add_child(&mut self, character: char, node_index: u32) -> u32 {
+    |            ^^^^^^^^^
+...
+455 |     pub fn add_value(&mut self, phoneme_sequence: CompactPhonemeSequenc...
+    |            ^^^^^^^^^
+...
+465 |     pub fn memory_usage(&self) -> MemoryUsage {
+    |            ^^^^^^^^^^^^
+
+warning: associated items `to_phoneme_sequence` and `from_phoneme_sequence` are never used
+   --> src/dictionary/compact.rs:485:12
+    |
+483 | impl CompactValue {
+    | ----------------- associated items in this implementation
+484 |     /// Convert to a regular phoneme sequence.
+485 |     pub fn to_phoneme_sequence(&self) -> Result<PhonemeSequence> {
+    |            ^^^^^^^^^^^^^^^^^^^
+...
+490 |     pub fn from_phoneme_sequence(phoneme_sequence: &PhonemeSequence) ->...
+    |            ^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `MemoryUsage` is never constructed
+   --> src/dictionary/compact.rs:499:19
+    |
+499 | pub(crate) struct MemoryUsage {
+    |                   ^^^^^^^^^^^
+
+warning: field `optimized` is never read
+   --> src/rules/patterns.rs:337:5
+    |
+332 | pub struct CompiledPattern {
+    |            --------------- field in this struct
+...
+337 |     optimized: String,
+    |     ^^^^^^^^^
+    |
+    = note: `CompiledPattern` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: methods `find_first` and `find_all` are never used
+   --> src/rules/patterns.rs:379:12
+    |
+363 | impl PatternMatcher {
+    | ------------------- methods in this implementation
+...
+379 |     pub fn find_first(&self, text: &str) -> Option<(usize, usize, Vec<S...
+    |            ^^^^^^^^^^
+...
+405 |     pub fn find_all(&self, text: &str) -> Vec<(usize, usize, Vec<String...
+    |            ^^^^^^^^
+
+warning: field `preserve_case` is never read
+  --> src/normalizer/tokenizer.rs:90:5
+   |
+88 | pub struct TextNormalizer {
+   |            -------------- field in this struct
+89 |     /// Whether to preserve case information
+90 |     preserve_case: bool,
+   |     ^^^^^^^^^^^^^
+   |
+   = note: `TextNormalizer` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: method `should_keep_token` is never used
+   --> src/normalizer/tokenizer.rs:304:8
+    |
+95  | impl TextNormalizer {
+    | ------------------- method in this implementation
+...
+304 |     fn should_keep_token(&self, token: &Token) -> bool {
+    |        ^^^^^^^^^^^^^^^^^
+
+warning: function `apply_english_stress` is never used
+   --> src/english/rules.rs:195:8
+    |
+195 | pub fn apply_english_stress(phonemes: &mut Vec<Phoneme>) -> Result<(), ...
+    |        ^^^^^^^^^^^^^^^^^^^^
+
+warning: creating a shared reference to mutable static is discouraged
+  --> src/english/dictionary.rs:43:15
+   |
+43 |         match &DEFAULT_DICTIONARY {
+   |               ^^^^^^^^^^^^^^^^^^^ shared reference to mutable static
+   |
+   = note: for more information, see <https://doc.rust-lang.org/nightly/edition-guide/rust-2024/static-mut-references.html>
+   = note: shared references to mutable statics are dangerous; it's undefined behavior if the static is mutated or if a mutable reference is created for it while the shared reference lives
+   = note: `#[warn(static_mut_refs)]` on by default
+help: use `&raw const` instead to create a raw pointer
+   |
+43 |         match &raw const DEFAULT_DICTIONARY {
+   |               ~~~~~~~~~~
+
+warning: `phonesis` (lib) generated 25 warnings
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.08s
+     Running `target/debug/examples/test_hello_world`
+🧪 PHONESIS G2P IPA OUTPUT TEST
+
+Input: 'hello'
+  ARPABET: ["HH", "EH0", "L", "OW0", "UH0"]
+  ARPABET joined: HH EH0 L OW0 UH0
+  IPA: ["h", "ɛ", "l", "oʊ", "ʊ"]
+  IPA joined: h ɛ l oʊ ʊ
+  ✅ Contains IPA symbols
+
+Input: 'world'
+  ARPABET: ["W", "ER0", "R", "L", "D"]
+  ARPABET joined: W ER0 R L D
+  IPA: ["w", "ɝ", "r", "l", "d"]
+  IPA joined: w ɝ r l d
+  ✅ Contains IPA symbols
+
+Input: 'hello world'
+  ARPABET: ["HH", "EH0", "L", "OW0", "UH0", "W", "ER0", "R", "L", "D"]
+  ARPABET joined: HH EH0 L OW0 UH0 W ER0 R L D
+  IPA: ["h", "ɛ", "l", "oʊ", "ʊ", "w", "ɝ", "r", "l", "d"]
+  IPA joined: h ɛ l oʊ ʊ w ɝ r l d
+  ✅ Contains IPA symbols
+
+Input: 'TTS'
+Warning: Rules failed for 'TTS', using character fallback
+  ARPABET: ["T", "IY", "T", "IY", "EH", "S"]
+  ARPABET joined: T IY T IY EH S
+Warning: Rules failed for 'TTS', using character fallback
+  IPA: ["t", "i", "t", "i", "ɛ", "s"]
+  IPA joined: t i t i ɛ s
+  ✅ Contains IPA symbols
+
+Input: 'Kokoro'
+  ARPABET: ["K", "OW0", "UH0", "K", "AH0", "R", "OW0", "UH0"]
+  ARPABET joined: K OW0 UH0 K AH0 R OW0 UH0
+  IPA: ["k", "oʊ", "ʊ", "k", "ʌ", "r", "oʊ", "ʊ"]
+  IPA joined: k oʊ ʊ k ʌ r oʊ ʊ
+  ✅ Contains IPA symbols

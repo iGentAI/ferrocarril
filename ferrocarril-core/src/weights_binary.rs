@@ -8,7 +8,7 @@ use crate::{Parameter, FerroError};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::File;
-use std::io::{Read, Seek, SeekFrom};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 /// Metadata for a single tensor in the binary format
@@ -98,8 +98,8 @@ impl BinaryWeightLoader {
                         if entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
                             let subdir_path = entry.path().join("metadata.json");
                             if subdir_path.exists() && subdir_path.is_file() {
-                                metadata_path = Some(subdir_path);
                                 println!("Found metadata.json at: {}", subdir_path.display());
+                                metadata_path = Some(subdir_path);
                                 break;
                             }
                         }
@@ -353,7 +353,7 @@ impl BinaryWeightLoader {
         self.model_metadata.components.is_empty()
     }
     
-    /// Load a parameter for a component by name with the LoadWeights trait interface
+    /// Load a parameter for a component by name
     pub fn load_weight_into_parameter(
         &self,
         param: &mut Parameter,
@@ -366,18 +366,3 @@ impl BinaryWeightLoader {
     }
 }
 
-/// Implementation of the LoadWeights trait for BinaryWeightLoader
-impl crate::weights::LoadWeights for BinaryWeightLoader {
-    fn load_weights(
-        &mut self,  // Keep &mut self to match the trait definition
-        _loader: &crate::weights::PyTorchWeightLoader,
-        prefix: Option<&str>
-    ) -> Result<(), FerroError> {
-        // Convert prefix to component name
-        let _component = prefix.unwrap_or("model");
-        
-        // This is a stub implementation - actual implementation would
-        // load weights into components based on the component type
-        Ok(())
-    }
-}
