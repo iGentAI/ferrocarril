@@ -122,8 +122,8 @@ mod tests {
         assert!(result.success, "Basic conversion should succeed");
         assert!(!result.phonemes.is_empty(), "Should produce non-empty phonemes");
         
-        // Should contain HH for 'hello'
-        assert!(result.phonemes.contains("HH"), "Should contain HH phoneme for 'hello'");
+        // Should contain 'h' for 'hello' in IPA format (not ARPABET 'HH')
+        assert!(result.phonemes.contains("h"), "Should contain h phoneme for 'hello' in IPA format");
         
         println!("Original: \"{}\"", result.original_text);
         println!("Phonemes: {}", result.phonemes);

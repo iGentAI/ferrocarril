@@ -38,7 +38,7 @@ fn test_textencoder_corrected_architecture_with_real_g2p() -> Result<(), Box<dyn
     );
     
     // Test with corrected architecture and real weights
-    match text_encoder.load_weights_binary(&loader) {
+    match text_encoder.load_weights_binary(&loader, "text_encoder", "module") {
         Ok(_) => println!("✅ TextEncoder loaded with corrected LSTM architecture"),
         Err(e) => return Err(format!("TextEncoder weight loading failed: {}", e).into()),
     }

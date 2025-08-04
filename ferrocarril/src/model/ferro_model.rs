@@ -205,7 +205,7 @@ impl FerroModel {
         );
         
         // TextEncoder has a special implementation that doesn't take component/prefix
-        text_encoder.load_weights_binary(&loader)?;
+        text_encoder.load_weights_binary(&loader, "text_encoder", "module")?;
         println!("Text encoder weights loaded successfully");
 
         // Create and load CustomAlbert component with fixed config type

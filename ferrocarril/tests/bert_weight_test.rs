@@ -6,36 +6,30 @@
 #![cfg(feature = "weights")]
 
 use std::error::Error;
-use std::path::Path;
 use ferrocarril_core::{Config, tensor::Tensor, LoadWeightsBinary};
 use ferrocarril_core::weights_binary::BinaryWeightLoader;
-use ferrocarril_nn::bert::Bert;
-use ferrocarril_nn::bert::transformer::BertConfig;
-use ferrocarril_nn::Forward;
+use ferrocarril_nn::bert::{CustomAlbert, CustomAlbertConfig};
 
 #[test]
 fn test_bert_with_real_weights() -> Result<(), Box<dyn Error>> {
     println!("Testing CustomBERT with real weights...");
     
-    // Get the absolute path to the working directory
-    let cwd = std::env::current_dir()?;
-    println!("Current working directory: {:?}", cwd);
-    
     // Load the model config
-    let config_path = Path::new("/home/sandbox/ferrocarril_weights/config.json");
-    println!("Loading config from: {:?}", config_path);
-    let config = Config::from_json(&config_path.to_string_lossy())?;
+    let config_path = "/home/sandbox/ferrocarril_weights/config.json";
+    println!("Loading config from: {}", config_path);
+    let config = Config::from_json(config_path)?;
     
     // Create BERT config from model config
-    let bert_config = BertConfig {
+    let bert_config = CustomAlbertConfig {
         vocab_size: config.n_token,
+        embedding_size: 128, // ALBERT factorized embeddings
         hidden_size: config.plbert.hidden_size,
         num_attention_heads: config.plbert.num_attention_heads,
         num_hidden_layers: config.plbert.num_hidden_layers,
         intermediate_size: config.plbert.intermediate_size,
-        max_position_embeddings: 512, // Default value for ALBERT
-        dropout_prob: config.dropout,
+        max_position_embeddings: 512,
     };
+    
     println!("Created BERT config: vocab_size={}, hidden_size={}, num_heads={}, num_layers={}",
             bert_config.vocab_size, 
             bert_config.hidden_size, 
@@ -43,14 +37,14 @@ fn test_bert_with_real_weights() -> Result<(), Box<dyn Error>> {
             bert_config.num_hidden_layers);
     
     // Initialize CustomBERT
-    let mut bert = Bert::new(bert_config);
+    let mut bert = CustomAlbert::new(bert_config);
     println!("Initialized CustomBERT model");
     
     // Load weights
-    let weights_path = Path::new("/home/sandbox/ferrocarril_weights");
-    println!("Loading weights from: {:?}", weights_path);
+    let weights_path = "/home/sandbox/ferrocarril_weights";
+    println!("Loading weights from: {}", weights_path);
     let loader = BinaryWeightLoader::from_directory(weights_path)?;
-    println!("Created weight loader from: {:?}", weights_path);
+    println!("Created weight loader");
     
     // Load BERT weights
     bert.load_weights_binary(&loader, "bert", "module")?;
@@ -61,16 +55,16 @@ fn test_bert_with_real_weights() -> Result<(), Box<dyn Error>> {
     println!("Testing with input text: \"{}\"", input_text);
     
     // Create token IDs for the input text
-    let input_ids = Tensor::from_data(vec![0, 1, 2, 3, 0], vec![1, 5]);
+    let input_ids = Tensor::from_data(vec![0i64, 1, 2, 3, 0], vec![1, 5]);
     
-    // Create attention mask (no masking for this test)
+    // Create attention mask (1 = valid, 0 = masked)
     let attention_mask = Tensor::from_data(
-        vec![0; 1 * 5 * 5], // all zeros = no masking
-        vec![1, 5, 5]
+        vec![1i64; 1 * 5], // all valid
+        vec![1, 5]
     );
     
-    // Run forward pass
-    let output = bert.forward(&input_ids, None, Some(&attention_mask));
+    // Run forward pass with the correct API
+    let output = bert.forward(&input_ids, Some(&attention_mask));
     
     // Check output shape
     println!("Output shape: {:?}", output.shape());
@@ -84,7 +78,7 @@ fn test_bert_with_real_weights() -> Result<(), Box<dyn Error>> {
     
     for i in 0..output.data().len() {
         let val = output.data()[i];
-        if val != 0.0 {
+        if val.abs() > 1e-6 {
             has_nonzero = true;
         }
         sum += val;
@@ -108,5 +102,6 @@ fn test_bert_with_real_weights() -> Result<(), Box<dyn Error>> {
     // Assert that the output contains non-zero values
     assert!(has_nonzero, "CustomBERT should produce non-zero outputs with real weights");
     
+    println!("✅ CustomBERT test passed with real weights!");
     Ok(())
 }

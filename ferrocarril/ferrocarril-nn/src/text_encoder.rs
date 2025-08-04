@@ -6,6 +6,11 @@
 
 use crate::{conv::Conv1d, lstm::LSTM, Forward, Parameter};
 use ferrocarril_core::tensor::Tensor;
+use ferrocarril_core::FerroError;
+#[cfg(feature = "weights")]
+use ferrocarril_core::LoadWeightsBinary;
+#[cfg(feature = "weights")]
+use ferrocarril_core::weights_binary::BinaryWeightLoader;
 use std::sync::Arc;
 
 /// Helper function for applying a mask to a tensor - STRICT VERSION
@@ -297,8 +302,8 @@ impl TextEncoder {
         // 4. Transpose back for LSTM: [B, C, T] → [B, T, C]
         let x_btc = self.transpose_bct_to_btc_strict(&x_bct);
 
-        // 5. Single bidirectional LSTM
-        let (lstm_out, _) = self.lstm.forward_batch_first(&x_btc, None, None);  // [B, T, channels]
+        // 5. Single bidirectional LSTM with sequence lengths
+        let (lstm_out, _) = self.lstm.forward_batch_first_with_lengths(&x_btc, input_lengths, None, None);  // [B, T, channels]
         
         // 6. Transpose to final format: [B, T, C] → [B, C, T]
         let mut final_output = self.transpose_btc_to_bct_strict(&lstm_out);
@@ -390,21 +395,19 @@ impl ferrocarril_core::weights::LoadWeights for TextEncoder {
     }
 }
 
-impl TextEncoder {
-    /// Load weights from a binary weight loader - STRICT VERSION
-    pub fn load_weights_binary(
-        &mut self, 
-        loader: &ferrocarril_core::weights_binary::BinaryWeightLoader
-    ) -> Result<(), ferrocarril_core::FerroError> {
-        println!("Loading TextEncoder weights from binary loader...");
-        
-        // Component name must be "text_encoder" to match the output structure from the weight converter
-        let component = "text_encoder";
+#[cfg(feature = "weights")]
+impl LoadWeightsBinary for TextEncoder {
+    fn load_weights_binary(
+        &mut self,
+        loader: &BinaryWeightLoader,
+        component: &str,
+        prefix: &str
+    ) -> Result<(), FerroError> {
+        println!("Loading TextEncoder weights for {}.{}", component, prefix);
         
         // STRICT: Load embedding weights - fail immediately if missing
-        let embedding_weight_path = "module.embedding.weight";
-        let embedding_weight = loader.load_component_parameter(component, embedding_weight_path)
-            .map_err(|e| ferrocarril_core::FerroError::new(format!("CRITICAL: Failed to load embedding weights: {}", e)))?;
+        let embedding_weight = loader.load_component_parameter(component, "module.embedding.weight")
+            .map_err(|e| FerroError::new(format!("CRITICAL: Failed to load embedding weights: {}", e)))?;
         
         // STRICT: Validate embedding weight shape
         assert_eq!(embedding_weight.shape(), &[self.embedding.weight.data().shape()[0], self.channels],
@@ -419,7 +422,7 @@ impl TextEncoder {
             
             // Skip blocks beyond what exists in the weights - but be explicit about this
             if i >= 3 {
-                return Err(ferrocarril_core::FerroError::new(format!(
+                return Err(FerroError::new(format!(
                     "STRICT: CNN block {} requested but only 3 blocks exist in weights", i)));
             }
             
@@ -427,38 +430,38 @@ impl TextEncoder {
             let block = match Arc::get_mut(&mut self.cnn[i]) {
                 Some(b) => b,
                 None => {
-                    return Err(ferrocarril_core::FerroError::new(format!(
+                    return Err(FerroError::new(format!(
                         "STRICT: Cannot get mutable reference to CNN block {}", i)));
                 }
             };
 
             // STRICT: Load Conv1d weights - fail immediately if missing
-            let weight_g_path = format!("module.cnn.{}.0.weight_g", i);
-            let weight_v_path = format!("module.cnn.{}.0.weight_v", i);
-            let bias_path = format!("module.cnn.{}.0.bias", i);
+            let weight_g_path = format!("{}.cnn.{}.0.weight_g", prefix, i);
+            let weight_v_path = format!("{}.cnn.{}.0.weight_v", prefix, i);
+            let bias_path = format!("{}.cnn.{}.0.bias", prefix, i);
             
             let weight_g = loader.load_component_parameter(component, &weight_g_path)
-                .map_err(|e| ferrocarril_core::FerroError::new(format!("CRITICAL: Failed to load {}: {}", weight_g_path, e)))?;
+                .map_err(|e| FerroError::new(format!("CRITICAL: Failed to load {}: {}", weight_g_path, e)))?;
             let weight_v = loader.load_component_parameter(component, &weight_v_path)
-                .map_err(|e| ferrocarril_core::FerroError::new(format!("CRITICAL: Failed to load {}: {}", weight_v_path, e)))?;
+                .map_err(|e| FerroError::new(format!("CRITICAL: Failed to load {}: {}", weight_v_path, e)))?;
             
             block.conv.set_weight_norm(&weight_g, &weight_v)
-                .map_err(|e| ferrocarril_core::FerroError::new(format!("STRICT: Failed to set weight norm for block {}: {}", i, e)))?;
+                .map_err(|e| FerroError::new(format!("STRICT: Failed to set weight norm for block {}: {}", i, e)))?;
             
             // Load bias
             let bias = loader.load_component_parameter(component, &bias_path)
-                .map_err(|e| ferrocarril_core::FerroError::new(format!("CRITICAL: Failed to load {}: {}", bias_path, e)))?;
+                .map_err(|e| FerroError::new(format!("CRITICAL: Failed to load {}: {}", bias_path, e)))?;
             block.conv.set_bias(&bias)
-                .map_err(|e| ferrocarril_core::FerroError::new(format!("STRICT: Failed to set bias for block {}: {}", i, e)))?;
+                .map_err(|e| FerroError::new(format!("STRICT: Failed to set bias for block {}: {}", i, e)))?;
             
             // STRICT: Load LayerNorm weights - fail immediately if missing
-            let gamma_path = format!("module.cnn.{}.1.gamma", i);
-            let beta_path = format!("module.cnn.{}.1.beta", i);
+            let gamma_path = format!("{}.cnn.{}.1.gamma", prefix, i);
+            let beta_path = format!("{}.cnn.{}.1.beta", prefix, i);
             
             let gamma = loader.load_component_parameter(component, &gamma_path)
-                .map_err(|e| ferrocarril_core::FerroError::new(format!("CRITICAL: Failed to load {}: {}", gamma_path, e)))?;
+                .map_err(|e| FerroError::new(format!("CRITICAL: Failed to load {}: {}", gamma_path, e)))?;
             let beta = loader.load_component_parameter(component, &beta_path)
-                .map_err(|e| ferrocarril_core::FerroError::new(format!("CRITICAL: Failed to load {}: {}", beta_path, e)))?;
+                .map_err(|e| FerroError::new(format!("CRITICAL: Failed to load {}: {}", beta_path, e)))?;
             
             block.ln.gamma = Parameter::new(gamma);
             block.ln.beta = Parameter::new(beta);
@@ -466,41 +469,13 @@ impl TextEncoder {
             println!("✅ CNN block {} loaded successfully", i);
         }
         
-        // STRICT: Load bidirectional LSTM weights - fail immediately if missing
+        // STRICT: Load bidirectional LSTM weights using the corrected stacked weight loading
         println!("Loading bidirectional LSTM weights...");
         
-        // Forward direction weights
-        let forward_weight_ih = loader.load_component_parameter(component, "module.lstm.weight_ih_l0")
-            .map_err(|e| ferrocarril_core::FerroError::new(format!("CRITICAL: Failed to load LSTM forward weight_ih: {}", e)))?;
-        let forward_weight_hh = loader.load_component_parameter(component, "module.lstm.weight_hh_l0")
-            .map_err(|e| ferrocarril_core::FerroError::new(format!("CRITICAL: Failed to load LSTM forward weight_hh: {}", e)))?;
-        let forward_bias_ih = loader.load_component_parameter(component, "module.lstm.bias_ih_l0")
-            .map_err(|e| ferrocarril_core::FerroError::new(format!("CRITICAL: Failed to load LSTM forward bias_ih: {}", e)))?;
-        let forward_bias_hh = loader.load_component_parameter(component, "module.lstm.bias_hh_l0")
-            .map_err(|e| ferrocarril_core::FerroError::new(format!("CRITICAL: Failed to load LSTM forward bias_hh: {}", e)))?;
+        self.lstm.load_weights_binary(loader, component, &format!("{}.lstm", prefix))
+            .map_err(|e| FerroError::new(format!("CRITICAL: TextEncoder LSTM loading failed: {}", e)))?;
         
-        // Backward direction weights
-        let backward_weight_ih = loader.load_component_parameter(component, "module.lstm.weight_ih_l0_reverse")
-            .map_err(|e| ferrocarril_core::FerroError::new(format!("CRITICAL: Failed to load LSTM backward weight_ih: {}", e)))?;
-        let backward_weight_hh = loader.load_component_parameter(component, "module.lstm.weight_hh_l0_reverse")
-            .map_err(|e| ferrocarril_core::FerroError::new(format!("CRITICAL: Failed to load LSTM backward weight_hh: {}", e)))?;
-        let backward_bias_ih = loader.load_component_parameter(component, "module.lstm.bias_ih_l0_reverse")
-            .map_err(|e| ferrocarril_core::FerroError::new(format!("CRITICAL: Failed to load LSTM backward bias_ih: {}", e)))?;
-        let backward_bias_hh = loader.load_component_parameter(component, "module.lstm.bias_hh_l0_reverse")
-            .map_err(|e| ferrocarril_core::FerroError::new(format!("CRITICAL: Failed to load LSTM backward bias_hh: {}", e)))?;
-        
-        // Load into single bidirectional LSTM
-        self.lstm.weight_ih_l0 = Parameter::new(forward_weight_ih);
-        self.lstm.weight_hh_l0 = Parameter::new(forward_weight_hh);
-        self.lstm.bias_ih_l0 = Parameter::new(forward_bias_ih);
-        self.lstm.bias_hh_l0 = Parameter::new(forward_bias_hh);
-        self.lstm.weight_ih_l0_reverse = Parameter::new(backward_weight_ih);
-        self.lstm.weight_hh_l0_reverse = Parameter::new(backward_weight_hh);
-        self.lstm.bias_ih_l0_reverse = Parameter::new(backward_bias_ih);
-        self.lstm.bias_hh_l0_reverse = Parameter::new(backward_bias_hh);
-        
-        println!("✅ Bidirectional LSTM weights loaded successfully");
-        println!("✅ TextEncoder weights loaded with STRICT validation - no fallbacks!");
+        println!("✅ TextEncoder bidirectional LSTM weights loaded successfully with PyTorch stacked format");
         Ok(())
     }
 }

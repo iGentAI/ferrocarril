@@ -203,181 +203,86 @@ impl DurationEncoder {
         Self { blocks, d_model, style_dim }
     }
 
-    /// Forward pass with EXACT PYTORCH BEHAVIORAL MATCHING - CRITICAL CHANNEL FIX
-    /// PyTorch DurationEncoder returns [B, T, d_model] NOT [B, T, d_model+style_dim]
-    /// CRITICAL: All input validation MUST be strict - NO SILENT ADAPTATIONS
     pub fn forward(&self,
                txt_feat: &Tensor<f32>,
-               style: &Tensor<f32>,
+               style: &Tensor<f32>, 
                mask: &Tensor<bool>)
     -> Tensor<f32> {
     
-    // CRITICAL INPUT VALIDATION: STRICT format requirements [B, C, T]
     assert_eq!(txt_feat.shape().len(), 3,
         "STRICT: txt_feat must be 3D [batch, channels, time], got: {:?}", txt_feat.shape());
     assert_eq!(txt_feat.shape()[1], self.d_model,
-        "STRICT: txt_feat channels {} must equal d_model {}, got shape {:?}", 
-        txt_feat.shape()[1], self.d_model, txt_feat.shape());
+        "STRICT: txt_feat channels {} must equal d_model {}", txt_feat.shape()[1], self.d_model);
     
     println!("DurationEncoder STRICT input validation: txt_feat shape={:?} [B, C, T], style shape={:?} [B, style]", 
              txt_feat.shape(), style.shape());
     
-    let masks = mask; // [B, T] format
+    let (b, c, t) = (txt_feat.shape()[0], txt_feat.shape()[1], txt_feat.shape()[2]);
     
-    // PyTorch: x = x.permute(2, 0, 1)  # [B,C,T] → [T,B,C]
-    let mut x = self.transpose_bct_to_tbc(txt_feat);
-    let (t, b, c) = { let s = x.shape(); (s[0], s[1], s[2]) };
+    let mut x = txt_feat.clone();
     
-    println!("After permute(2,0,1): shape={:?} [T,B,C]", x.shape());
-    
-    // STRICT: Validate the transpose worked correctly
-    assert_eq!(x.shape(), &[txt_feat.shape()[2], txt_feat.shape()[0], txt_feat.shape()[1]],
-        "STRICT: Transpose failed - expected [T,B,C] = [{},{},{}], got {:?}",
-        txt_feat.shape()[2], txt_feat.shape()[0], txt_feat.shape()[1], x.shape());
-    
-    // PyTorch: s = style.expand(x.shape[0], x.shape[1], -1)  # [B,style] → [T,B,style]
-    let mut style_expanded = vec![0.0; t * b * self.style_dim];
-    for time in 0..t {
-        for batch in 0..b {
-            for s in 0..self.style_dim {
-                style_expanded[time * b * self.style_dim + batch * self.style_dim + s] = 
-                    style[&[batch, s]];
-            }
-        }
-    }
-    let style_tbc = Tensor::from_data(style_expanded, vec![t, b, self.style_dim]);
-    
-    // PyTorch: x = torch.cat([x, s], axis=-1)  # [T,B,C] + [T,B,style] → [T,B,C+style]  
-    let mut concat_data = vec![0.0; t * b * (c + self.style_dim)];
-    for time in 0..t {
-        for batch in 0..b {
-            // Copy x features
-            for ch in 0..c {
-                concat_data[time * b * (c + self.style_dim) + batch * (c + self.style_dim) + ch] = 
-                    x[&[time, batch, ch]];
-            }
-            // Copy style features
-            for s in 0..self.style_dim {
-                concat_data[time * b * (c + self.style_dim) + batch * (c + self.style_dim) + c + s] = 
-                    style_tbc[&[time, batch, s]];
-            }
-        }
-    }
-    
-    x = Tensor::from_data(concat_data, vec![t, b, c + self.style_dim]);
-    println!("After torch.cat([x, s], axis=-1): shape={:?} [T,B,C+style]", x.shape());
-    
-    // STRICT: Validate concatenation worked correctly
-    assert_eq!(x.shape(), &[t, b, c + self.style_dim],
-        "STRICT: Style concatenation failed");
-    
-    // PyTorch: x.masked_fill_(masks.unsqueeze(-1).transpose(0, 1), 0.0)
-    let masks_transformed = self.transform_mask_for_tbc_tensor(masks); // [B,T] → [T,B,1]
-    
-    // STRICT: Validate mask transformation
-    assert_eq!(masks_transformed.shape(), &[t, b, 1],
-        "STRICT: Mask transform failed - expected [T={},B={},1], got {:?}", t, b, masks_transformed.shape());
-    
-    self.mask_fill_tbc_with_broadcasted_mask(&mut x, &masks_transformed, 0.0);
-    
-    // PyTorch: x = x.transpose(0, 1)  # [T,B,C+style] → [B,T,C+style]
-    x = self.transpose_tbc_to_btc(&x);
-    println!("After transpose(0, 1): shape={:?} [B,T,C+style]", x.shape());
-    
-    // STRICT: Validate transpose back to batch-first
-    assert_eq!(x.shape(), &[b, t, c + self.style_dim],
-        "STRICT: Transpose back to batch-first failed");
-    
-    // Process through LSTM and AdaLayerNorm blocks following PyTorch exactly
     for (block_idx, blk) in self.blocks.iter().enumerate() {
         match blk {
             Block::Rnn(rnn) => {
-                // PyTorch: x = x.transpose(-1, -2) before LSTM → [B,C+style,T] 
-                x = self.transpose_btc_to_bct(&x);
+                let style_bct = self.expand_style_to_bct(style, x.shape()[2]);
+                x = self.concat_channels_bct(&x, &style_bct);
                 
-                // Execute LSTM on transposed tensor
-                let x_btc = self.transpose_bct_to_btc(&x); // Back to [B,T,C+style]
+                let x_btc = self.transpose_bct_to_btc(&x);
                 
-                // STRICT: Validate LSTM input has correct dimensions
-                assert_eq!(x_btc.shape()[2], self.d_model + self.style_dim,
+                let expected_features = self.d_model + self.style_dim;
+                assert_eq!(x_btc.shape()[2], expected_features,
                     "STRICT: LSTM block {} expects input features {}, got {}. Shape: {:?}",
-                    block_idx, self.d_model + self.style_dim, x_btc.shape()[2], x_btc.shape());
+                    block_idx, expected_features, x_btc.shape()[2], x_btc.shape());
                 
-                let (h, _) = rnn.forward_batch_first(&x_btc, None, None);
+                println!("LSTM {} input shape: {:?} [B,T,C+style={}]", block_idx, x_btc.shape(), expected_features);
                 
-                // CRITICAL: After bidirectional LSTM, output should be [B,T,d_model] (style dropped)
-                x = self.transpose_btc_to_bct(&h); // [B,d_model,T]
+                let input_lengths = vec![t; b];
+                let (h, _) = rnn.forward_batch_first_with_lengths(&x_btc, &input_lengths, None, None);
                 
-                // STRICT: Validate LSTM output dropped style channels correctly
-                assert_eq!(x.shape()[1], self.d_model,
+                assert_eq!(h.shape()[2], self.d_model,
                     "STRICT: LSTM {} should output d_model={} channels, got {}. Shape: {:?}",
-                    block_idx, self.d_model, x.shape()[1], x.shape());
+                    block_idx, self.d_model, h.shape()[2], h.shape());
                 
-                println!("LSTM {} output shape: {:?} - style channels correctly dropped to d_model", block_idx, x.shape());
+                x = self.transpose_btc_to_bct(&h);
                 
-                // Pad if needed
-                let x_padded = self.pad_tensor_if_needed(&x, masks.shape()[1]);
-                x = x_padded;
+                println!("LSTM {} output shape: {:?} [B,d_model,T] - style channels correctly dropped", block_idx, x.shape());
             }
             Block::Ada(adaln) => {
-                // PyTorch: x = block(x.transpose(-1, -2), style).transpose(-1, -2)
-                let x_btc = self.transpose_bct_to_btc(&x); // [B,C,T] → [B,T,C]
-                let ada_out = adaln.forward(&x_btc, style);  
-                x = self.transpose_btc_to_bct(&ada_out); // [B,T,C] → [B,C,T]
+                let x_btc = self.transpose_bct_to_btc(&x);
+                let normed_btc = adaln.forward(&x_btc, style);
+                x = self.transpose_btc_to_bct(&normed_btc);
                 
-                println!("AdaLayerNorm {} output shape: {:?}", block_idx, x.shape());
+                println!("AdaLayerNorm {} output shape: {:?} [B,d_model,T]", block_idx, x.shape());
                 
-                // CRITICAL: MUST re-add style after AdaLayerNorm for next LSTM iteration
-                // PyTorch: x = torch.cat([x, s.permute(1, 2, 0)], axis=1)
-                let mut style_bct = vec![0.0; b * self.style_dim * x.shape()[2]];
-                let t_current = x.shape()[2];
-                for batch in 0..b {
-                    for s in 0..self.style_dim {
-                        for time in 0..t_current {
-                            style_bct[batch * self.style_dim * t_current + s * t_current + time] = 
-                                style[&[batch, s]];
-                        }
-                    }
-                }
-                let style_tensor = Tensor::from_data(style_bct, vec![b, self.style_dim, t_current]);
-                
-                // Concatenate along channel dimension (axis=1)
-                x = self.concat_channels_bct(&x, &style_tensor);
-                
-                // STRICT: Validate style was re-added correctly
-                assert_eq!(x.shape()[1], self.d_model + self.style_dim,
-                    "STRICT: After AdaLayerNorm {}, channels should be d_model+style={}, got {}",
-                    block_idx, self.d_model + self.style_dim, x.shape()[1]);
-                
-                // PyTorch: x.masked_fill_(masks.unsqueeze(-1).transpose(-1, -2), 0.0)
-                self.apply_mask_bct_with_broadcast(&mut x, masks);
+                self.apply_mask_bct_with_broadcast(&mut x, mask);
             }
         }
     }
     
-    // CRITICAL FIX: PyTorch DurationEncoder returns [B,T,d_model] NOT [B,T,d_model+style]
-    // The final bidirectional LSTM should have dropped style channels
-    let final_bct = x; // Current: should be [B, d_model, T] if the last block was LSTM
+    let final_output = self.transpose_bct_to_btc(&x);
     
-    // STRICT: Validate final tensor has correct channel count
-    if final_bct.shape()[1] != self.d_model {
-        return panic!("CRITICAL: DurationEncoder final tensor has {} channels, expected d_model={}. \
-                      This indicates the final block was not an LSTM or LSTM didn't drop style correctly. \
-                      Current shape: {:?}", 
-                      final_bct.shape()[1], self.d_model, final_bct.shape());
-    }
-    
-    // PyTorch: return x.transpose(-1, -2)  # [B,d_model,T] → [B,T,d_model] 
-    let final_output = self.transpose_bct_to_btc(&final_bct);
-    
-    // STRICT: Final output validation
     assert_eq!(final_output.shape(), &[b, t, self.d_model],
-        "STRICT: DurationEncoder final output shape mismatch: expected [{},{},{}], got {:?}",
-        b, t, self.d_model, final_output.shape());
+        "STRICT: DurationEncoder final output shape mismatch");
     
-    println!("DurationEncoder final output VALIDATED: {:?} [B,T,d_model] - NO STYLE CHANNELS", final_output.shape());
+    println!("DurationEncoder final output VALIDATED: {:?} [B,T,d_model]", final_output.shape());
     final_output
 }
+    
+    fn expand_style_to_bct(&self, style: &Tensor<f32>, time_length: usize) -> Tensor<f32> {
+        let (b, style_dim) = (style.shape()[0], style.shape()[1]);
+        let mut expanded = vec![0.0f32; b * style_dim * time_length];
+        
+        for batch in 0..b {
+            for s in 0..style_dim {
+                for time in 0..time_length {
+                    expanded[batch * style_dim * time_length + s * time_length + time] = 
+                        style[&[batch, s]];
+                }
+            }
+        }
+        
+        Tensor::from_data(expanded, vec![b, style_dim, time_length])
+    }
 
     /// Helper: transpose [B,C,T] → [T,B,C]
     fn transpose_bct_to_tbc(&self, x: &Tensor<f32>) -> Tensor<f32> {
@@ -623,18 +528,23 @@ impl DurationEncoder {
             
             match blk {
                 Block::Rnn(lstm) => {
-                    // In Kokoro, the LSTM blocks are stored in the module.text_encoder.lstms array
-                    let lstm_idx = i / 2 * 2; // Convert block index to lstm index (0,1,2,3,4,5 -> 0,0,2,2,4,4)
-                    let lstm_prefix = format!("{}.lstms.{}", prefix, lstm_idx);
+                    // DurationEncoder has alternating LSTM+AdaLayerNorm pattern
+                    // Block 0: LSTM, Block 1: AdaLayerNorm, Block 2: LSTM, Block 3: AdaLayerNorm
+                    // LSTM blocks are at indices 0, 2, 4 (even indices only)
+                    // PyTorch lstms array: [LSTM0, AdaLayerNorm0, LSTM1, AdaLayerNorm1, LSTM2, AdaLayerNorm2]
                     
-                    println!("Loading LSTM weights for block {} from {}.lstms.{}", i, prefix, lstm_idx);
+                    let lstm_index = i; // Direct mapping to PyTorch lstms array
+                    let lstm_prefix = format!("{}.lstms.{}", prefix, lstm_index);
                     
-                    // Try to load LSTM weights, but don't fail if not found
+                    println!("Loading LSTM weights for block {} from {}.lstms.{}", i, prefix, lstm_index);
+                    
+                    // ALL DurationEncoder LSTMs are bidirectional and use stacked weight format
+                    // Load using the corrected bidirectional stacked weight method
                     if let Err(e) = lstm.load_weights_binary_with_reverse(
                         loader, 
                         component, 
                         &lstm_prefix,
-                        i % 2 == 1 // odd indices are reverse
+                        false // Always load as forward (stacked weight format handles bidirectional)
                     ) {
                         println!("Warning: Could not load LSTM weights for block {}. Error: {}", i, e);
                         println!("Using default random weights instead.");
@@ -644,12 +554,11 @@ impl DurationEncoder {
                     }
                 },
                 Block::Ada(adaln) => {
-                    // In Kokoro, the FC layers are stored in the module.text_encoder.lstms array
-                    // after each LSTM pair
-                    let fc_idx = i / 2 * 2 + 1; // Convert block index to fc index (0,1,2,3,4,5 -> 1,1,3,3,5,5)
-                    let fc_prefix = format!("{}.lstms.{}", prefix, fc_idx);
+                    // AdaLayerNorm blocks at indices 1, 3, 5 (odd indices)
+                    let fc_index = i; // Direct mapping to PyTorch lstms array
+                    let fc_prefix = format!("{}.lstms.{}", prefix, fc_index);
                     
-                    println!("Loading AdaLayerNorm weights for block {} from {}.lstms.{}", i, prefix, fc_idx);
+                    println!("Loading AdaLayerNorm weights for block {} from {}.lstms.{}", i, prefix, fc_index);
                     
                     // Try to load AdaLayerNorm weights, but don't fail if not found
                     if let Err(e) = adaln.load_weights_binary(

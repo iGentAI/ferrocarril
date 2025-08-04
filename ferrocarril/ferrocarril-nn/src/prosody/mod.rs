@@ -314,10 +314,14 @@ impl ProsodyPredictor {
         let noise_proj_out = self.noise_proj.forward(&noise);
 
         // STRICT: Validate projection outputs
-        assert_eq!(f0_proj_out.shape(), &[batch_size, 1, frames],
-            "STRICT: F0 projection output shape mismatch");
-        assert_eq!(noise_proj_out.shape(), &[batch_size, 1, frames], 
-            "STRICT: Noise projection output shape mismatch");
+        // Note: F0 block 1 upsamples by 2x, so final frame count is upsampled_frames
+        let upsampled_frames = frames * 2; // After AdainResBlk1d block 1 upsampling
+        assert_eq!(f0_proj_out.shape(), &[batch_size, 1, upsampled_frames],
+            "STRICT: F0 projection output shape mismatch: expected [batch={}, 1, upsampled_frames={}], got {:?}",
+            batch_size, upsampled_frames, f0_proj_out.shape());
+        assert_eq!(noise_proj_out.shape(), &[batch_size, 1, upsampled_frames], 
+            "STRICT: Noise projection output shape mismatch: expected [batch={}, 1, upsampled_frames={}], got {:?}",
+            batch_size, upsampled_frames, noise_proj_out.shape());
 
         // Squeeze dimension 1: [B, 1, F] → [B, F]
         let f0_squeezed = self.squeeze_dim1_strict(&f0_proj_out)?;

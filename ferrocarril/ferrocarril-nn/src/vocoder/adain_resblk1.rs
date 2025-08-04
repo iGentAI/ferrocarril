@@ -87,9 +87,9 @@ impl AdaINResBlock1 {
             adain1.push(AdaIN1d::new(style_dim, channels));
             adain2.push(AdaIN1d::new(style_dim, channels));
             
-            // Alpha parameters for Snake1D
-            let alpha1_tensor = Tensor::from_data(vec![1.0; channels], vec![channels]);
-            let alpha2_tensor = Tensor::from_data(vec![1.0; channels], vec![channels]);
+            // Alpha parameters for Snake1D with shape [1, channels, 1] for broadcasting
+            let alpha1_tensor = Tensor::from_data(vec![1.0; 1 * channels * 1], vec![1, channels, 1]);
+            let alpha2_tensor = Tensor::from_data(vec![1.0; 1 * channels * 1], vec![1, channels, 1]);
             
             alpha1.push(Parameter::new(alpha1_tensor));
             alpha2.push(Parameter::new(alpha2_tensor));
@@ -185,14 +185,28 @@ impl AdaINResBlock1 {
             // Process through AdaIN and Snake1D (matching Kokoro exactly)
             let mut xt = self.adain1[i].forward(&result, s);
             
-            // Apply Snake1D activation
+            // Apply Snake1D activation with PyTorch broadcasting pattern
+            let alpha1_param = &self.alpha1[i];
+            
+            // Verify alpha parameter has correct shape for broadcasting
+            assert_eq!(alpha1_param.data().shape(), &[1, xt.shape()[1], 1],
+                "Alpha1 parameter must have shape [1, channels, 1] for broadcasting, got: {:?}",
+                alpha1_param.data().shape());
+            let shape = xt.shape().to_vec();
             let mut xt_data = xt.data().to_vec();
-            for j in 0..xt_data.len() {
-                // For simplicity, use the same alpha for all channels in this block
-                let alpha = self.alpha1[i].data()[&[0]];
-                xt_data[j] = snake1d(xt_data[j], alpha);
+            let (batch, channels, time) = (shape[0], shape[1], shape[2]);
+            
+            for b in 0..batch {
+                for c in 0..channels {
+                    for t in 0..time {
+                        let idx = b * channels * time + c * time + t;
+                        let alpha = alpha1_param.data()[&[0, c, 0]];
+                        let x_val = xt_data[idx];
+                        xt_data[idx] = x_val + (1.0 / alpha) * ((alpha * x_val).sin().powi(2));
+                    }
+                }
             }
-            xt = Tensor::from_data(xt_data, xt.shape().to_vec());
+            xt = Tensor::from_data(xt_data, shape);
             
             // Apply upsampling if this is the first iteration and we have upsampling
             // This matches Kokoro: if i==0 and self.upsample is not None: xt = self.upsample(xt)
@@ -212,14 +226,29 @@ impl AdaINResBlock1 {
             // Second AdaIN (matches Kokoro: xt = n2(xt, s))
             xt = self.adain2[i].forward(&xt, s);
             
-            // Apply second Snake1D activation (matches Kokoro)
+            // Apply second Snake1D activation (matches Kokoro) with PyTorch broadcasting
+            let alpha2_param = &self.alpha2[i];
+            
+            // Verify alpha parameter has correct shape for broadcasting
+            assert_eq!(alpha2_param.data().shape(), &[1, xt.shape()[1], 1],
+                "Alpha2 parameter must have shape [1, channels, 1] for broadcasting, got: {:?}",
+                alpha2_param.data().shape());
+            
+            let shape = xt.shape().to_vec();
             let mut xt_data = xt.data().to_vec();
-            for j in 0..xt_data.len() {
-                // For simplicity, use the same alpha for all channels in this block
-                let alpha = self.alpha2[i].data()[&[0]];
-                xt_data[j] = snake1d(xt_data[j], alpha);
+            let (batch, channels, time) = (shape[0], shape[1], shape[2]);
+            
+            for b in 0..batch {
+                for c in 0..channels {
+                    for t in 0..time {
+                        let idx = b * channels * time + c * time + t;
+                        let alpha = alpha2_param.data()[&[0, c, 0]];
+                        let x_val = xt_data[idx];
+                        xt_data[idx] = x_val + (1.0 / alpha) * ((alpha * x_val).sin().powi(2));
+                    }
+                }
             }
-            xt = Tensor::from_data(xt_data, xt.shape().to_vec());
+            xt = Tensor::from_data(xt_data, shape);
             
             // Second convolution (matches Kokoro: xt = c2(xt))
             xt = self.convs2[i].forward(&xt);
@@ -231,66 +260,21 @@ impl AdaINResBlock1 {
         result
     }
     
-pub fn forward(&self, x: &Tensor<f32>, s: &Tensor<f32>) -> Tensor<f32> {
-    // Following the Kokoro implementation exactly:
-    // 1. Process the residual path (_residual)
-    // 2. Process the shortcut path (_shortcut)
-    // 3. Add them and normalize by 1/sqrt(2)
-    
-    // Get residual path output
-    let out = self._residual(x, s);
-    
-    // Get shortcut path output
-    let shortcut = self._shortcut(x);
-    
-    // Ensure dimensions match for addition
-    if out.shape() != shortcut.shape() {
-        // This is the only place where we must handle dimension mismatch
-        // The AdaINResBlock in Kokoro can affect dimensions through upsampling & convolutions
-        println!("Shape mismatch in AdaINResBlock1: residual path {:?}, shortcut path {:?}",
-               out.shape(), shortcut.shape());
+    pub fn forward(&self, x: &Tensor<f32>, s: &Tensor<f32>) -> Tensor<f32> {
+        // STRICT: Process residual and shortcut paths exactly like PyTorch
+        let out = self._residual(x, s);
+        let shortcut = self._shortcut(x);
         
-        // Verify batch dimension is the same
-        if out.shape()[0] != shortcut.shape()[0] {
-            panic!("Batch dimension mismatch in AdaINResBlock1: residual={}, shortcut={}",
-                  out.shape()[0], shortcut.shape()[0]);
-        }
+        // STRICT: Shapes MUST match exactly or the architecture is wrong
+        assert_eq!(out.shape(), shortcut.shape(),
+            "CRITICAL ARCHITECTURAL ERROR: Residual path {:?} and shortcut path {:?} shapes don't match. \
+            This indicates a fundamental bug in the channel transformation logic. \
+            NO SILENT ADAPTATIONS ALLOWED - FIX THE ARCHITECTURE.",
+            out.shape(), shortcut.shape());
         
-        // Handle the case where shapes don't match - use minimum dimensions
-        // This is a critical adaptation point in the architecture
-        let batch = out.shape()[0];
-        
-        // Find minimum channel and time dimensions
-        let channels = std::cmp::min(out.shape()[1], shortcut.shape()[1]);
-        let time = std::cmp::min(out.shape()[2], shortcut.shape()[2]);
-        
-        // Print detailed dimensions for debugging
-        println!("Using minimum dimensions: channels={}, time={}", channels, time);
-        
-        // Create result with minimum dimensions and add the overlapping parts
-        let mut result_data = vec![0.0; batch * channels * time];
-        let norm_factor = 1.0 / (2.0f32).sqrt(); // 1/sqrt(2)
-        
-        // Add the overlapping parts from both paths
-        for b in 0..batch {
-            for c in 0..channels {
-                for t in 0..time {
-                    let out_idx = b * out.shape()[1] * out.shape()[2] + c * out.shape()[2] + t;
-                    let sc_idx = b * shortcut.shape()[1] * shortcut.shape()[2] + c * shortcut.shape()[2] + t;
-                    let res_idx = b * channels * time + c * time + t;
-                    
-                    if out_idx < out.data().len() && sc_idx < shortcut.data().len() {
-                        result_data[res_idx] = (out.data()[out_idx] + shortcut.data()[sc_idx]) * norm_factor;
-                    }
-                }
-            }
-        }
-        
-        Tensor::from_data(result_data, vec![batch, channels, time])
-    } else {
-        // When shapes match exactly, add them directly
-        let mut result_data = vec![0.0; out.data().len()];
+        // Add paths with normalization
         let norm_factor = 1.0 / (2.0f32).sqrt();
+        let mut result_data = vec![0.0; out.data().len()];
         
         for i in 0..out.data().len() {
             result_data[i] = (out.data()[i] + shortcut.data()[i]) * norm_factor;
@@ -298,7 +282,6 @@ pub fn forward(&self, x: &Tensor<f32>, s: &Tensor<f32>) -> Tensor<f32> {
         
         Tensor::from_data(result_data, out.shape().to_vec())
     }
-}
 }
 
 /// Helper function to calculate padding based on kernel size and dilation
@@ -314,67 +297,222 @@ impl LoadWeightsBinary for AdaINResBlock1 {
         component: &str,
         prefix: &str
     ) -> Result<(), FerroError> {
-        println!("Loading AdaINResBlock1 weights for {}.{}", component, prefix);
+        println!("Loading AdaINResBlock1 weights for {}.{} (Generator-style)", component, prefix);
         
-        // Load convolution layers
+        // PyTorch Generator uses convs1/convs2 arrays with multiple dilation layers
+        // convs1.0, convs1.1, convs1.2 (3 layers) and convs2.0, convs2.1, convs2.2
+        
+        // Load convs1 layers (multiple dilation convolutions)
         for (i, conv) in self.convs1.iter_mut().enumerate() {
             let conv_prefix = format!("{}.convs1.{}", prefix, i);
-            if let Err(e) = conv.load_weights_binary(loader, component, &conv_prefix) {
-                println!("Warning: Failed to load weights for convs1.{}: {}", i, e);
-            }
+            conv.load_weights_binary(loader, component, &conv_prefix)
+                .map_err(|e| FerroError::new(format!("CRITICAL: AdaINResBlock1 convs1.{} loading FAILED: {}", i, e)))?;
         }
         
+        // Load convs2 layers (fixed dilation=1 convolutions)
         for (i, conv) in self.convs2.iter_mut().enumerate() {
             let conv_prefix = format!("{}.convs2.{}", prefix, i);
-            if let Err(e) = conv.load_weights_binary(loader, component, &conv_prefix) {
-                println!("Warning: Failed to load weights for convs2.{}: {}", i, e);
-            }
+            conv.load_weights_binary(loader, component, &conv_prefix)
+                .map_err(|e| FerroError::new(format!("CRITICAL: AdaINResBlock1 convs2.{} loading FAILED: {}", i, e)))?;
         }
         
-        // Load the conv1x1 shortcut weights if we have a learned shortcut
+        // Load conv1x1 shortcut weights if we have a learned shortcut
         if self.learned_sc {
             if let Some(ref mut conv1x1) = self.conv1x1 {
                 let conv_prefix = format!("{}.conv1x1", prefix);
-                if let Err(e) = conv1x1.load_weights_binary(loader, component, &conv_prefix) {
-                    println!("Warning: Failed to load weights for conv1x1: {}", e);
-                }
+                conv1x1.load_weights_binary(loader, component, &conv_prefix)
+                    .map_err(|e| FerroError::new(format!("CRITICAL: AdaINResBlock1 conv1x1 loading FAILED: {}", e)))?;
             }
         }
         
-        // Load AdaIN layers
+        // Load AdaIN1 layers (adain1.0, adain1.1, adain1.2)
         for (i, adain) in self.adain1.iter_mut().enumerate() {
             let adain_prefix = format!("{}.adain1.{}", prefix, i);
-            if let Err(e) = adain.load_weights_binary(loader, component, &adain_prefix) {
-                println!("Warning: Failed to load weights for adain1.{}: {}", i, e);
-            }
+            adain.load_weights_binary(loader, component, &adain_prefix)
+                .map_err(|e| FerroError::new(format!("CRITICAL: AdaINResBlock1 adain1.{} loading FAILED: {}", i, e)))?;
         }
         
+        // Load AdaIN2 layers (adain2.0, adain2.1, adain2.2)
         for (i, adain) in self.adain2.iter_mut().enumerate() {
             let adain_prefix = format!("{}.adain2.{}", prefix, i);
-            if let Err(e) = adain.load_weights_binary(loader, component, &adain_prefix) {
-                println!("Warning: Failed to load weights for adain2.{}: {}", i, e);
-            }
+            adain.load_weights_binary(loader, component, &adain_prefix)
+                .map_err(|e| FerroError::new(format!("CRITICAL: AdaINResBlock1 adain2.{} loading FAILED: {}", i, e)))?;
         }
         
-        // Load alpha parameters
+        // Load alpha parameters (alpha1.0, alpha1.1, alpha1.2)
         for (i, alpha) in self.alpha1.iter_mut().enumerate() {
             let alpha_path = format!("{}.alpha1.{}", prefix, i);
-            if let Ok(alpha_tensor) = loader.load_component_parameter(component, &alpha_path) {
-                *alpha = Parameter::new(alpha_tensor);
-            } else {
-                println!("Warning: Failed to load alpha1.{}", i);
-            }
+            let alpha_tensor = loader.load_component_parameter(component, &alpha_path)
+                .map_err(|e| FerroError::new(format!("CRITICAL: AdaINResBlock1 alpha1.{} loading FAILED: {}", i, e)))?;
+            *alpha = Parameter::new(alpha_tensor);
         }
         
+        // Load alpha2 parameters (alpha2.0, alpha2.1, alpha2.2)
         for (i, alpha) in self.alpha2.iter_mut().enumerate() {
             let alpha_path = format!("{}.alpha2.{}", prefix, i);
-            if let Ok(alpha_tensor) = loader.load_component_parameter(component, &alpha_path) {
-                *alpha = Parameter::new(alpha_tensor);
-            } else {
-                println!("Warning: Failed to load alpha2.{}", i);
+            let alpha_tensor = loader.load_component_parameter(component, &alpha_path)
+                .map_err(|e| FerroError::new(format!("CRITICAL: AdaINResBlock1 alpha2.{} loading FAILED: {}", i, e)))?;
+            *alpha = Parameter::new(alpha_tensor);
+        }
+        
+        println!("✅ AdaINResBlock1: All Generator-style weights loaded successfully");
+        Ok(())
+    }
+}
+
+pub struct AdainResBlk1d {
+    conv1: Conv1d,
+    conv2: Conv1d,
+    norm1: AdaIN1d,
+    norm2: AdaIN1d,
+    conv1x1: Option<Conv1d>,
+    upsample: Option<UpSample1d>,
+    learned_sc: bool,
+    dim_in: usize,
+    dim_out: usize,
+}
+
+impl AdainResBlk1d {
+    pub fn new(
+        dim_in: usize,
+        dim_out: usize,
+        style_dim: usize,
+        upsample_type: Option<UpsampleType>,
+    ) -> Self {
+        let learned_sc = (dim_in != dim_out) || upsample_type.is_some();
+        
+        let conv1 = Conv1d::new(
+            dim_in,
+            dim_out,
+            3,
+            1,
+            1,
+            1,
+            1,
+            true,
+        );
+        
+        let conv2 = Conv1d::new(
+            dim_out,
+            dim_out,
+            3,
+            1,
+            1,
+            1,
+            1,
+            true,
+        );
+        
+        let norm1 = AdaIN1d::new(style_dim, dim_in);
+        let norm2 = AdaIN1d::new(style_dim, dim_out);
+        
+        let conv1x1 = if learned_sc {
+            Some(Conv1d::new(
+                dim_in,
+                dim_out,
+                1,
+                1,
+                0,
+                1,
+                1,
+                false,
+            ))
+        } else {
+            None
+        };
+        
+        let upsample = upsample_type.map(UpSample1d::new);
+        
+        Self {
+            conv1,
+            conv2,
+            norm1,
+            norm2,
+            conv1x1,
+            upsample,
+            learned_sc,
+            dim_in,
+            dim_out,
+        }
+    }
+    
+    pub fn forward(&self, x: &Tensor<f32>, s: &Tensor<f32>) -> Tensor<f32> {
+        let mut xt = self.norm1.forward(x, s);
+        xt = self.apply_snake_activation(xt);
+        
+        if let Some(ref up) = self.upsample {
+            xt = up.forward(&xt);
+        }
+        
+        xt = self.conv1.forward(&xt);
+        xt = self.norm2.forward(&xt, s);
+        xt = self.apply_snake_activation(xt);
+        let xt = self.conv2.forward(&xt);
+        
+        let mut shortcut = x.clone();
+        
+        if let Some(ref up) = self.upsample {
+            shortcut = up.forward(&shortcut);
+        }
+        
+        if self.learned_sc {
+            if let Some(ref conv) = self.conv1x1 {
+                shortcut = conv.forward(&shortcut);
             }
         }
         
+        self.combine_paths(&xt, &shortcut)
+    }
+    
+    fn apply_snake_activation(&self, mut tensor: Tensor<f32>) -> Tensor<f32> {
+        let alpha = 1.0f32;
+        let mut data = tensor.data().to_vec();
+        for val in data.iter_mut() {
+            *val = snake1d(*val, alpha);
+        }
+        Tensor::from_data(data, tensor.shape().to_vec())
+    }
+    
+    fn combine_paths(&self, residual: &Tensor<f32>, shortcut: &Tensor<f32>) -> Tensor<f32> {
+        let norm_factor = 1.0 / (2.0f32).sqrt();
+        
+        if residual.shape() == shortcut.shape() {
+            let mut result_data = vec![0.0; residual.data().len()];
+            for i in 0..residual.data().len() {
+                result_data[i] = (residual.data()[i] + shortcut.data()[i]) * norm_factor;
+            }
+            Tensor::from_data(result_data, residual.shape().to_vec())
+        } else {
+            panic!("AdainResBlk1d: Residual and shortcut paths have mismatched shapes: {:?} vs {:?}",
+                   residual.shape(), shortcut.shape());
+        }
+    }
+}
+
+#[cfg(feature = "weights")]
+impl LoadWeightsBinary for AdainResBlk1d {
+    fn load_weights_binary(
+        &mut self,
+        loader: &BinaryWeightLoader,
+        component: &str,
+        prefix: &str
+    ) -> Result<(), FerroError> {
+        println!("Loading AdainResBlk1d weights for {}.{} (dim_in={} → dim_out={})", 
+                 component, prefix, self.dim_in, self.dim_out);
+        
+        self.conv1.load_weights_binary(loader, component, &format!("{}.conv1", prefix))?;
+        self.conv2.load_weights_binary(loader, component, &format!("{}.conv2", prefix))?;
+        
+        if self.learned_sc {
+            if let Some(ref mut conv1x1) = self.conv1x1 {
+                conv1x1.load_weights_binary(loader, component, &format!("{}.conv1x1", prefix))?;
+            }
+        }
+        
+        self.norm1.load_weights_binary(loader, component, &format!("{}.norm1", prefix))?;
+        self.norm2.load_weights_binary(loader, component, &format!("{}.norm2", prefix))?;
+        
+        println!("✅ AdainResBlk1d: All weights loaded successfully");
         Ok(())
     }
 }

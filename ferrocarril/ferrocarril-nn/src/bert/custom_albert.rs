@@ -271,23 +271,45 @@ impl AlbertAttention {
             
         let (batch_size, seq_length, _) = (hidden_states.shape()[0], hidden_states.shape()[1], hidden_states.shape()[2]);
         
-        // Apply attention (simplified implementation for now)
-        // In full implementation, this would include:
-        // 1. Q/K/V projections
-        // 2. Multi-head attention computation  
-        // 3. Attention masking
-        // 4. Output projection
+        // 1. Compute Query, Key, Value projections
+        let query = self.linear_projection(hidden_states, &self.query_weight, &self.query_bias);
+        let key = self.linear_projection(hidden_states, &self.key_weight, &self.key_bias);
+        let value = self.linear_projection(hidden_states, &self.value_weight, &self.value_bias);
         
-        // For now, implement identity transformation to validate architecture
-        let attention_output = hidden_states.clone();
+        // 2. Reshape for multi-head attention: [batch, seq, heads, head_dim]
+        let query_reshaped = self.reshape_for_attention(&query, batch_size, seq_length);
+        let key_reshaped = self.reshape_for_attention(&key, batch_size, seq_length);
+        let value_reshaped = self.reshape_for_attention(&value, batch_size, seq_length);
         
-        // Add residual connection
+        // 3. Compute attention scores: Q @ K^T / sqrt(head_dim)
+        let attention_scores = self.compute_attention_scores(&query_reshaped, &key_reshaped);
+        
+        // 4. Apply attention mask if provided
+        let masked_scores = if let Some(mask) = attention_mask {
+            self.apply_attention_mask(&attention_scores, mask)
+        } else {
+            attention_scores
+        };
+        
+        // 5. Apply softmax to get attention probabilities
+        let attention_probs = self.softmax(&masked_scores);
+        
+        // 6. Apply attention to values: attention_probs @ V
+        let context = self.apply_attention(&attention_probs, &value_reshaped);
+        
+        // 7. Reshape back to [batch, seq, hidden]
+        let context_reshaped = self.reshape_from_attention(&context, batch_size, seq_length);
+        
+        // 8. Apply output projection (dense layer)
+        let attention_output = self.linear_projection(&context_reshaped, &self.dense_weight, &self.dense_bias);
+        
+        // 9. Add residual connection
         let mut residual_output = vec![0.0; batch_size * seq_length * self.hidden_size];
         for i in 0..residual_output.len() {
             residual_output[i] = hidden_states.data()[i] + attention_output.data()[i];
         }
         
-        // Apply LayerNorm
+        // 10. Apply LayerNorm
         let mut normed_output = vec![0.0; residual_output.len()];
         let gamma = self.layer_norm_weight.data();
         let beta = self.layer_norm_bias.data();
@@ -318,6 +340,219 @@ impl AlbertAttention {
         }
         
         Tensor::from_data(normed_output, vec![batch_size, seq_length, self.hidden_size])
+    }
+    
+    /// Linear projection: input @ weight^T + bias
+    fn linear_projection(&self, input: &Tensor<f32>, weight: &Parameter, bias: &Parameter) -> Tensor<f32> {
+        let (batch_size, seq_length, hidden_size) = (input.shape()[0], input.shape()[1], input.shape()[2]);
+        let mut output = vec![0.0; batch_size * seq_length * hidden_size];
+        
+        let weight_data = weight.data();
+        let bias_data = bias.data();
+        
+        // Compute: output = input @ weight.T + bias
+        for b in 0..batch_size {
+            for s in 0..seq_length {
+                for h_out in 0..hidden_size {
+                    let mut sum = bias_data[&[h_out]];
+                    
+                    for h_in in 0..hidden_size {
+                        sum += input[&[b, s, h_in]] * weight_data[&[h_out, h_in]];
+                    }
+                    
+                    output[b * seq_length * hidden_size + s * hidden_size + h_out] = sum;
+                }
+            }
+        }
+        
+        Tensor::from_data(output, vec![batch_size, seq_length, hidden_size])
+    }
+    
+    /// Reshape tensor for multi-head attention: [batch, seq, hidden] -> [batch, heads, seq, head_dim]
+    fn reshape_for_attention(&self, tensor: &Tensor<f32>, batch_size: usize, seq_length: usize) -> Tensor<f32> {
+        let mut reshaped = vec![0.0; batch_size * self.num_attention_heads * seq_length * self.attention_head_size];
+        
+        for b in 0..batch_size {
+            for s in 0..seq_length {
+                for h in 0..self.num_attention_heads {
+                    for d in 0..self.attention_head_size {
+                        let src_idx = b * seq_length * self.hidden_size + s * self.hidden_size + h * self.attention_head_size + d;
+                        let dst_idx = b * self.num_attention_heads * seq_length * self.attention_head_size 
+                                    + h * seq_length * self.attention_head_size 
+                                    + s * self.attention_head_size + d;
+                        reshaped[dst_idx] = tensor.data()[src_idx];
+                    }
+                }
+            }
+        }
+        
+        Tensor::from_data(reshaped, vec![batch_size, self.num_attention_heads, seq_length, self.attention_head_size])
+    }
+    
+    /// Compute attention scores: Q @ K^T / sqrt(head_dim)
+    fn compute_attention_scores(&self, query: &Tensor<f32>, key: &Tensor<f32>) -> Tensor<f32> {
+        let batch_size = query.shape()[0];
+        let seq_length = query.shape()[2];
+        let scale = 1.0 / (self.attention_head_size as f32).sqrt();
+        
+        let mut scores = vec![0.0; batch_size * self.num_attention_heads * seq_length * seq_length];
+        
+        // For each batch and head
+        for b in 0..batch_size {
+            for h in 0..self.num_attention_heads {
+                // Compute Q @ K^T for this head
+                for s_q in 0..seq_length {
+                    for s_k in 0..seq_length {
+                        let mut dot_product = 0.0;
+                        
+                        // Dot product over head dimension
+                        for d in 0..self.attention_head_size {
+                            let q_idx = b * self.num_attention_heads * seq_length * self.attention_head_size
+                                      + h * seq_length * self.attention_head_size
+                                      + s_q * self.attention_head_size + d;
+                            let k_idx = b * self.num_attention_heads * seq_length * self.attention_head_size
+                                      + h * seq_length * self.attention_head_size
+                                      + s_k * self.attention_head_size + d;
+                            dot_product += query.data()[q_idx] * key.data()[k_idx];
+                        }
+                        
+                        let score_idx = b * self.num_attention_heads * seq_length * seq_length
+                                      + h * seq_length * seq_length
+                                      + s_q * seq_length + s_k;
+                        scores[score_idx] = dot_product * scale;
+                    }
+                }
+            }
+        }
+        
+        Tensor::from_data(scores, vec![batch_size, self.num_attention_heads, seq_length, seq_length])
+    }
+    
+    /// Apply attention mask (0=masked, 1=valid)
+    fn apply_attention_mask(&self, scores: &Tensor<f32>, mask: &Tensor<i64>) -> Tensor<f32> {
+        let batch_size = scores.shape()[0];
+        let seq_length = scores.shape()[2];
+        let mut masked_scores = scores.data().to_vec();
+        
+        // Expand mask from [batch, seq] to [batch, 1, 1, seq] shape for broadcasting
+        for b in 0..batch_size {
+            for h in 0..self.num_attention_heads {
+                for s_q in 0..seq_length {
+                    for s_k in 0..seq_length {
+                        let mask_value = mask[&[b, s_k]];
+                        if mask_value == 0 {  // Position is masked
+                            let score_idx = b * self.num_attention_heads * seq_length * seq_length
+                                          + h * seq_length * seq_length
+                                          + s_q * seq_length + s_k;
+                            masked_scores[score_idx] -= 10000.0;  // Large negative value
+                        }
+                    }
+                }
+            }
+        }
+        
+        Tensor::from_data(masked_scores, scores.shape().to_vec())
+    }
+    
+    /// Softmax over last dimension
+    fn softmax(&self, scores: &Tensor<f32>) -> Tensor<f32> {
+        let shape = scores.shape();
+        let batch_size = shape[0];
+        let seq_length = shape[2];
+        let mut probs = vec![0.0; scores.data().len()];
+        
+        // Apply softmax over last dimension (keys) for each query position
+        for b in 0..batch_size {
+            for h in 0..self.num_attention_heads {
+                for s_q in 0..seq_length {
+                    // Find max for numerical stability
+                    let mut max_score = f32::NEG_INFINITY;
+                    for s_k in 0..seq_length {
+                        let idx = b * self.num_attention_heads * seq_length * seq_length
+                                + h * seq_length * seq_length
+                                + s_q * seq_length + s_k;
+                        max_score = max_score.max(scores.data()[idx]);
+                    }
+                    
+                    // Compute exp and sum
+                    let mut sum_exp = 0.0;
+                    for s_k in 0..seq_length {
+                        let idx = b * self.num_attention_heads * seq_length * seq_length
+                                + h * seq_length * seq_length
+                                + s_q * seq_length + s_k;
+                        let exp_val = (scores.data()[idx] - max_score).exp();
+                        probs[idx] = exp_val;
+                        sum_exp += exp_val;
+                    }
+                    
+                    // Normalize
+                    for s_k in 0..seq_length {
+                        let idx = b * self.num_attention_heads * seq_length * seq_length
+                                + h * seq_length * seq_length
+                                + s_q * seq_length + s_k;
+                        probs[idx] /= sum_exp;
+                    }
+                }
+            }
+        }
+        
+        Tensor::from_data(probs, shape.to_vec())
+    }
+    
+    /// Apply attention: attention_probs @ V
+    fn apply_attention(&self, probs: &Tensor<f32>, value: &Tensor<f32>) -> Tensor<f32> {
+        let batch_size = probs.shape()[0];
+        let seq_length = probs.shape()[2];
+        let mut output = vec![0.0; batch_size * self.num_attention_heads * seq_length * self.attention_head_size];
+        
+        // Matrix multiply: [batch, heads, seq, seq] @ [batch, heads, seq, head_dim]
+        for b in 0..batch_size {
+            for h in 0..self.num_attention_heads {
+                for s_q in 0..seq_length {
+                    for d in 0..self.attention_head_size {
+                        let mut sum = 0.0;
+                        
+                        for s_k in 0..seq_length {
+                            let prob_idx = b * self.num_attention_heads * seq_length * seq_length
+                                         + h * seq_length * seq_length
+                                         + s_q * seq_length + s_k;
+                            let val_idx = b * self.num_attention_heads * seq_length * self.attention_head_size
+                                        + h * seq_length * self.attention_head_size
+                                        + s_k * self.attention_head_size + d;
+                            sum += probs.data()[prob_idx] * value.data()[val_idx];
+                        }
+                        
+                        let out_idx = b * self.num_attention_heads * seq_length * self.attention_head_size
+                                    + h * seq_length * self.attention_head_size
+                                    + s_q * self.attention_head_size + d;
+                        output[out_idx] = sum;
+                    }
+                }
+            }
+        }
+        
+        Tensor::from_data(output, vec![batch_size, self.num_attention_heads, seq_length, self.attention_head_size])
+    }
+    
+    /// Reshape from attention format back to [batch, seq, hidden]
+    fn reshape_from_attention(&self, tensor: &Tensor<f32>, batch_size: usize, seq_length: usize) -> Tensor<f32> {
+        let mut output = vec![0.0; batch_size * seq_length * self.hidden_size];
+        
+        for b in 0..batch_size {
+            for s in 0..seq_length {
+                for h in 0..self.num_attention_heads {
+                    for d in 0..self.attention_head_size {
+                        let src_idx = b * self.num_attention_heads * seq_length * self.attention_head_size
+                                    + h * seq_length * self.attention_head_size
+                                    + s * self.attention_head_size + d;
+                        let dst_idx = b * seq_length * self.hidden_size + s * self.hidden_size + h * self.attention_head_size + d;
+                        output[dst_idx] = tensor.data()[src_idx];
+                    }
+                }
+            }
+        }
+        
+        Tensor::from_data(output, vec![batch_size, seq_length, self.hidden_size])
     }
 }
 
@@ -654,5 +889,74 @@ mod tests {
         // Verify all parameters initialized
         assert_eq!(model.embeddings.word_embeddings.data().shape(), &[178, 128]);
         assert_eq!(model.embedding_hidden_mapping.weight.data().shape(), &[768, 128]);
+    }
+    
+    #[test]
+    fn test_attention_mechanism() {
+        let hidden_size = 768;
+        let num_heads = 12;
+        let attention = AlbertAttention::new(hidden_size, num_heads);
+        
+        // Test with simple input
+        let batch_size = 2;
+        let seq_length = 5;
+        let hidden_states = Tensor::from_data(
+            vec![0.1; batch_size * seq_length * hidden_size],
+            vec![batch_size, seq_length, hidden_size]
+        );
+        
+        // Test without mask
+        let output = attention.forward(&hidden_states, None);
+        assert_eq!(output.shape(), &[batch_size, seq_length, hidden_size], 
+            "Attention output shape must match input shape");
+        
+        // Test with attention mask
+        let mask = Tensor::from_data(
+            vec![1i64, 1, 1, 0, 0, 1, 1, 1, 1, 0], // Two sequences with padding
+            vec![batch_size, seq_length]
+        );
+        let output_masked = attention.forward(&hidden_states, Some(&mask));
+        assert_eq!(output_masked.shape(), &[batch_size, seq_length, hidden_size],
+            "Masked attention output shape must match input shape");
+        
+        // Verify outputs are different with/without mask
+        let output_data = output.data();
+        let output_masked_data = output_masked.data();
+        let mut diff_count = 0;
+        for i in 0..output_data.len() {
+            if (output_data[i] - output_masked_data[i]).abs() > 1e-6 {
+                diff_count += 1;
+            }
+        }
+        assert!(diff_count > 0, "Attention mask should affect the output");
+    }
+    
+    #[test] 
+    fn test_attention_numerical_stability() {
+        let attention = AlbertAttention::new(768, 12);
+        
+        // Test with extreme values to ensure numerical stability
+        let batch_size = 1;
+        let seq_length = 3;
+        let hidden_size = 768;
+        
+        let mut data = vec![0.0; batch_size * seq_length * hidden_size];
+        // Create varied input values
+        for i in 0..data.len() {
+            data[i] = ((i % 10) as f32 - 5.0) * 0.1;
+        }
+        
+        let hidden_states = Tensor::from_data(data, vec![batch_size, seq_length, hidden_size]);
+        let output = attention.forward(&hidden_states, None);
+        
+        // Check output is finite
+        for &val in output.data() {
+            assert!(val.is_finite(), "Attention output must be finite");
+        }
+        
+        // Check output is bounded (after layer norm)
+        for &val in output.data() {
+            assert!(val.abs() < 100.0, "Attention output should be reasonably bounded");
+        }
     }
 }

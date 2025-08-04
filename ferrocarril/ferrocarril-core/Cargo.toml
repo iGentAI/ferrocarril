@@ -4,12 +4,15 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-# Core serialization dependencies for binary weight loading
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-
-# Direct dependency on Phonesis G2P
-phonesis = { path = "../../phonesis" }
+serde           = { version = "1.0", features = ["derive"] }
+serde-pickle    = "1.2"  # Keep for compatibility with PyTorch pickle format
+serde_json      = "1.0"  # For JSON metadata parsing
+zip             = "0.6"  # For handling PyTorch zip-based formats
+memmap2         = "0.7"  # For memory mapping binary files
+thiserror       = "1.0"  # For better error handling (new)
+phonesis        = { path = "../phonesis", features = ["english"] }
+rmp-serde       = "1.1"  # For msgpack metadata (optimal binary format)
+flate2          = "1.0"  # For compressed JSON fallback
 
 [features]
 default = ["weights"]
