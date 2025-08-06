@@ -161,7 +161,7 @@ impl BinaryWeightLoader {
     }
     
     
-    /// Load a tensor by name
+    /// Load a tensor by name - FAIL-FAST VERSION
     pub fn load_tensor(&self, name: &str) -> Result<Tensor<f32>, FerroError> {
         // Split the name into component and parameter parts if it contains a dot
         let parts: Vec<&str> = name.split('.').collect();
@@ -172,154 +172,195 @@ impl BinaryWeightLoader {
             let param = &name[component.len() + 1..]; // +1 for the dot
             self.load_component_parameter(component, param)
         } else {
-            // Try to find the parameter in any component
-            for component_name in self.list_components() {
-                if let Ok(parameters) = self.list_parameters(&component_name) {
-                    if parameters.contains(&name.to_string()) {
-                        return self.load_component_parameter(&component_name, name);
-                    }
-                }
-            }
-            
-            Err(FerroError::new(format!("Tensor '{}' not found in any component", name)))
+            // STRICT: No silent searching - parameter must be explicit
+            return Err(FerroError::new(format!(
+                "CRITICAL: Ambiguous parameter name '{}'. Must specify component.parameter format. \
+                Available components: {:?}", 
+                name, self.list_components()
+            )));
         }
     }
 
-    /// Load a component and parameter by name
-    pub fn load_component_parameter(&self, component: &str, param: &str) -> Result<Tensor<f32>, FerroError> {
-        // Find the component
+    /// Load a component and parameter by name with CRITICAL validation - NO SILENT FAILURES
+    pub fn load_component_parameter(&self, component: &str, param_name: &str) -> Result<Tensor<f32>, FerroError> {
+        // STRICT: Component must exist
         let component_meta = self.model_metadata.components.get(component)
-            .ok_or_else(|| FerroError::new(format!("Component '{}' not found", component)))?;
+            .ok_or_else(|| FerroError::new(format!(
+                "CRITICAL: Component '{}' not found. Available components: {:?}", 
+                component, self.list_components()
+            )))?;
         
-        // Find the parameter
-        let tensor_meta = component_meta.parameters.get(param)
-            .ok_or_else(|| FerroError::new(format!("Parameter '{}' not found in component '{}'", param, component)))?;
+        // STRICT: Parameter must exist in component
+        let tensor_meta = component_meta.parameters.get(param_name)
+            .ok_or_else(|| {
+                // Provide detailed error with available parameters for debugging
+                let available_params: Vec<String> = component_meta.parameters.keys().map(|k| format!("\"{}\"", k)).collect();
+                FerroError::new(format!(
+                    "CRITICAL: Parameter '{}' not found in component '{}'. Available parameters: [{}]",
+                    param_name, component, available_params.join(", ")
+                ))
+            })?;
+        
+        // CRITICAL: Validate tensor metadata integrity
+        if tensor_meta.shape.is_empty() {
+            return Err(FerroError::new(format!(
+                "CRITICAL: Parameter '{}' in component '{}' has empty shape", 
+                param_name, component
+            )));
+        }
+        
+        // STRICT: Validate tensor shape is reasonable
+        let expected_elements: usize = tensor_meta.shape.iter().product();
+        if expected_elements == 0 {
+            return Err(FerroError::new(format!(
+                "CRITICAL: Parameter '{}' in component '{}' has zero-sized shape {:?}", 
+                param_name, component, tensor_meta.shape
+            )));
+        }
         
         // Get file path from metadata
         let file_path = self.model_base_path.join(&tensor_meta.file);
         
-        // Check if file exists
+        // STRICT: File must exist - NO ALTERNATIVE PATHS
         if !file_path.exists() {
-            // Try alternative paths
-            let alt_paths = vec![
-                // Try direct component/param path
-                self.model_base_path.join(component).join(format!("{}.bin", param.replace(".", "_"))),
-                // Try from original base path
-                self.original_base_path.join(&tensor_meta.file),
-                // Try in model subdirectory of original path
-                self.original_base_path.join("model").join(&tensor_meta.file),
-            ];
-            
-            for alt_path in &alt_paths {
-                if alt_path.exists() {
-                    println!("Using alternative path: {}", alt_path.display());
-                    return self.load_tensor_from_path(alt_path, &tensor_meta.shape);
-                }
-            }
-            
             return Err(FerroError::new(format!(
-                "File not found at '{}' or any alternative locations", 
+                "CRITICAL: Weight file not found: '{}'. \
+                This indicates incomplete weight conversion or corrupted weight directory. \
+                NO FALLBACKS PERMITTED.", 
                 file_path.display()
             )));
         }
         
-        self.load_tensor_from_path(&file_path, &tensor_meta.shape)
+        // Load tensor with comprehensive validation
+        let tensor = self.load_tensor_from_path_with_validation(&file_path, &tensor_meta.shape, component, param_name)?;
+        
+        println!("✅ Parameter '{}' loaded and validated: shape {:?}, {} elements", 
+                 param_name, tensor_meta.shape, tensor.data().len());
+        
+        Ok(tensor)
     }
     
-    /// Helper method to load tensor from a specific path
-    fn load_tensor_from_path(&self, file_path: &Path, shape: &Vec<usize>) -> Result<Tensor<f32>, FerroError> {
+    /// Helper method to load tensor from a specific path with comprehensive validation
+    fn load_tensor_from_path_with_validation(&self, file_path: &Path, shape: &Vec<usize>, component: &str, param_name: &str) -> Result<Tensor<f32>, FerroError> {
         // Read binary data from file
         let mut file = File::open(file_path)
-            .map_err(|e| FerroError::new(format!("Failed to open file '{}': {}", file_path.display(), e)))?;
+            .map_err(|e| FerroError::new(format!(
+                "CRITICAL: Cannot open weight file '{}': {}", 
+                file_path.display(), e
+            )))?;
         
-        // Calculate number of elements
+        // Calculate expected size
         let num_elements: usize = shape.iter().product();
         let expected_bytes = num_elements * 4; // 4 bytes per f32
         
         // Get actual file size
         let file_size = std::fs::metadata(file_path)
-            .map_err(|e| FerroError::new(format!("Failed to get file size for '{}': {}", file_path.display(), e)))?
+            .map_err(|e| FerroError::new(format!(
+                "CRITICAL: Cannot read metadata for '{}': {}", 
+                file_path.display(), e
+            )))?
             .len() as usize;
         
+        // STRICT: File size must match exactly - NO ADJUSTMENTS
         if expected_bytes != file_size {
-            println!("Warning: Expected {} bytes based on shape {:?}, but file is {} bytes. Adjusting.",
-                expected_bytes, shape, file_size);
+            return Err(FerroError::new(format!(
+                "CRITICAL: Parameter '{}' data/shape mismatch: shape {:?} expects {} elements ({} bytes), got {} bytes in file '{}'",
+                param_name, shape, num_elements, expected_bytes, file_size, file_path.display()
+            )));
         }
         
-        // Use the smaller of expected and actual size to avoid reading past EOF
-        let tensor_bytes = std::cmp::min(file_size, expected_bytes);
-        let actual_elements = tensor_bytes / 4;
-        
-        let mut bytes = vec![0u8; tensor_bytes];
+        // Read exact amount
+        let mut bytes = vec![0u8; expected_bytes];
         file.read_exact(&mut bytes)
-            .map_err(|e| FerroError::new(format!("Failed to read tensor data from '{}': {}", file_path.display(), e)))?;
+            .map_err(|e| FerroError::new(format!(
+                "CRITICAL: Failed to read weight data from '{}': {}", 
+                file_path.display(), e
+            )))?;
         
-        // Convert to f32
-        let mut data_vec = Vec::with_capacity(actual_elements);
-        for i in 0..actual_elements {
+        // Convert to f32 with strict validation
+        let mut data_vec = Vec::with_capacity(num_elements);
+        for i in 0..num_elements {
             let start = i * 4;
             let end = start + 4;
             let float_bytes = &bytes[start..end];
             let value = f32::from_le_bytes([float_bytes[0], float_bytes[1], float_bytes[2], float_bytes[3]]);
+            
+            // STRICT: Validate all data is finite
+            if !value.is_finite() {
+                return Err(FerroError::new(format!(
+                    "CRITICAL: Parameter '{}' contains non-finite value {} at index {}",
+                    param_name, value, i
+                )));
+            }
+            
             data_vec.push(value);
         }
         
-        // Adjust shape if needed
-        let mut adjusted_shape = shape.clone();
-        if shape.iter().product::<usize>() > actual_elements {
-            println!("Warning: Shape {:?} requires {} elements but only {} available. Adjusting shape.", 
-                shape, shape.iter().product::<usize>(), actual_elements);
-            
-            // Try to infer a reasonable shape
-            if shape.len() == 2 {
-                // For 2D tensors, keep the first dimension and adjust the second
-                let first_dim = shape[0];
-                let second_dim = actual_elements / first_dim;
-                adjusted_shape = vec![first_dim, second_dim];
-                println!("Adjusted shape to: {:?}", adjusted_shape);
-            }
+        // CRITICAL: Validate tensor data integrity
+        if data_vec.is_empty() {
+            return Err(FerroError::new(format!(
+                "CRITICAL: Parameter '{}' in component '{}' has empty data", 
+                param_name, component
+            )));
         }
         
-        Ok(Tensor::from_data(data_vec, adjusted_shape))
+        // Create validated tensor
+        let tensor = Tensor::from_data(data_vec, shape.clone());
+        
+        // VALIDATION: Verify tensor has reasonable statistical properties
+        let mean: f32 = tensor.data().iter().sum::<f32>() / tensor.data().len() as f32;
+        let variance: f32 = tensor.data().iter()
+            .map(|&x| (x - mean).powi(2))
+            .sum::<f32>() / tensor.data().len() as f32;
+        
+        // STRICT: Only check variance for larger tensors - bias vectors can have low variance
+        if tensor.data().len() > 1 && variance < 1e-10 {
+            return Err(FerroError::new(format!(
+                "CRITICAL: Suspiciously low variance ({}) in weights from '{}'. \
+                This may indicate zero-initialized or corrupted weights.", 
+                variance, file_path.display()
+            )));
+        }
+        
+        Ok(tensor)
     }
     
-    /// Load a voice by name
+    /// Helper method to load tensor from a specific path - STRICT VERSION
+    fn load_tensor_from_path(&self, file_path: &Path, shape: &Vec<usize>) -> Result<Tensor<f32>, FerroError> {
+        // Delegate to the comprehensive validation method with generic naming
+        self.load_tensor_from_path_with_validation(file_path, shape, "unknown", "unknown")
+    }
+    
+    /// Load a voice by name - NO SILENT FALLBACKS
     pub fn load_voice(&self, voice_name: &str) -> Result<Tensor<f32>, FerroError> {
-        // Make sure we have voices metadata
+        // STRICT: Voices metadata must exist
         let voices_meta = self.voices_metadata.as_ref()
-            .ok_or_else(|| FerroError::new("No voices metadata available"))?;
+            .ok_or_else(|| FerroError::new(
+                "CRITICAL: No voices available. Weight directory missing voices/ subdirectory."
+            ))?;
         
-        // Find the voice
+        // STRICT: Voice must exist
         let voice_meta = voices_meta.voices.get(voice_name)
-            .ok_or_else(|| FerroError::new(format!("Voice '{}' not found", voice_name)))?;
+            .ok_or_else(|| FerroError::new(format!(
+                "CRITICAL: Voice '{}' not found. Available voices: {:?}", 
+                voice_name, 
+                voices_meta.voices.keys().collect::<Vec<_>>()
+            )))?;
         
-        // Get voices base path, defaulting to original/voices if not set
-        let voices_path = match &self.voices_base_path {
-            Some(path) => path.clone(),
-            None => self.original_base_path.join("voices"),
-        };
+        // Get precise file path
+        let voices_path = self.voices_base_path.as_ref()
+            .ok_or_else(|| FerroError::new("CRITICAL: Voices base path not initialized"))?;
         
-        // Get file path
         let file_path = voices_path.join(&voice_meta.file);
         
-        // Check if file exists
+        // STRICT: Voice file must exist - NO ALTERNATIVES
         if !file_path.exists() {
-            // Try alternative paths
-            let alt_paths = vec![
-                // Try with filename directly
-                voices_path.join(format!("{}.bin", voice_name)),
-                // Try from original base path
-                self.original_base_path.join("voices").join(&voice_meta.file),
-            ];
-            
-            for alt_path in &alt_paths {
-                if alt_path.exists() {
-                    println!("Using alternative voice path: {}", alt_path.display());
-                    return self.load_tensor_from_path(alt_path, &voice_meta.shape);
-                }
-            }
-            
-            return Err(FerroError::new(format!("Voice file not found at '{}' or any alternative locations", file_path.display())));
+            return Err(FerroError::new(format!(
+                "CRITICAL: Voice file not found: '{}'. \
+                This indicates incomplete voice conversion or corrupted voice directory. \
+                NO FALLBACKS PERMITTED.", 
+                file_path.display()
+            )));
         }
         
         self.load_tensor_from_path(&file_path, &voice_meta.shape)

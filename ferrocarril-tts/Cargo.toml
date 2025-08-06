@@ -1,0 +1,31 @@
+[package]
+name = "ferrocarril-tts"
+version = "0.1.0"
+edition = "2021"
+authors = ["Ferrocarril Developers"]
+description = "Pure Rust TTS inference engine"
+license = "MIT"
+
+[features]
+default = ["weights"]
+weights = ["ferrocarril-core/weights"]
+
+[dependencies]
+ferrocarril-core = { path = "../ferrocarril-core" }
+ferrocarril-dsp = { path = "../ferrocarril-dsp" }
+ferrocarril-nn = { path = "../ferrocarril-nn" }
+phonesis = { path = "../phonesis", features = ["english"] }
+clap = { version = "4.5", features = ["derive"] }
+serde_json = "1.0"
+
+[[bin]]
+name = "ferrocarril-tts"
+path = "src/main.rs"
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"
+
+[profile.dev]
+opt-level = 1

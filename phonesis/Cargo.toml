@@ -15,11 +15,6 @@ categories = ["text-processing", "parsing"]
 name = "phonesis"
 path = "src/lib.rs"
 
-[workspace]
-members = [
-    "examples/*",
-]
-
 [features]
 default = ["english"]
 english = []

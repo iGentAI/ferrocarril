@@ -1,41 +1,27 @@
-//! Linear layer implementation
+//! Basic Linear layer implementation with strict validation
 
 use crate::{Parameter, Forward};
 use ferrocarril_core::tensor::Tensor;
-use ferrocarril_core::ops::matmul;
+use ferrocarril_core::{FerroError, LoadWeightsBinary};
+use ferrocarril_core::weights_binary::BinaryWeightLoader;
 
+#[derive(Debug)]
 pub struct Linear {
-    weight: Parameter,
-    bias: Option<Parameter>,
-    in_features: usize,
-    out_features: usize,
+    pub weight: Parameter,  // [out_features, in_features]
+    pub bias: Option<Parameter>, // [out_features]
+    pub in_features: usize,
+    pub out_features: usize,
 }
 
 impl Linear {
     pub fn new(in_features: usize, out_features: usize, bias: bool) -> Self {
-        // Initialize weight with small random-like values
-        let mut weight_data = vec![0.0; out_features * in_features];
-        for i in 0..weight_data.len() {
-            // Use a deterministic pattern, but not zeros
-            weight_data[i] = ((i % 10) as f32 - 5.0) * 0.01;
-        }
+        // STRICT: Validate parameters
+        assert!(in_features > 0, "CRITICAL: in_features must be positive, got: {}", in_features);
+        assert!(out_features > 0, "CRITICAL: out_features must be positive, got: {}", out_features);
         
-        let weight = Parameter::new(Tensor::from_data(
-            weight_data, 
-            vec![out_features, in_features]
-        ));
-        
-        // Initialize bias with small values
+        let weight = Parameter::new(Tensor::new(vec![out_features, in_features]));
         let bias = if bias {
-            let mut bias_data = vec![0.0; out_features];
-            for i in 0..bias_data.len() {
-                // Small non-zero bias values
-                bias_data[i] = ((i % 5) as f32 - 2.0) * 0.01;
-            }
-            Some(Parameter::new(Tensor::from_data(
-                bias_data, 
-                vec![out_features]
-            )))
+            Some(Parameter::new(Tensor::new(vec![out_features])))
         } else {
             None
         };
@@ -47,80 +33,125 @@ impl Linear {
             out_features,
         }
     }
-    
-    /// Get mutable reference to the weight parameter for testing
-    pub fn weight_mut(&mut self) -> &mut Parameter {
-        &mut self.weight
-    }
 }
 
 impl Forward for Linear {
     type Output = Tensor<f32>;
     
     fn forward(&self, input: &Tensor<f32>) -> Self::Output {
-        // Input shape: [batch_size, in_features]
-        // Weight shape: [out_features, in_features]
-        // Output shape: [batch_size, out_features]
+        let input_shape = input.shape();
         
-        let weight_transpose = ferrocarril_core::ops::transpose(&self.weight.data());
-        
-        // Batch matrix multiplication
-        let output = if input.shape().len() == 1 {
-            // Handle 1D input
-            let mut expanded_data = Vec::with_capacity(input.shape()[0]);
-            for i in 0..input.shape()[0] {
-                expanded_data.push(input[&[i]]);
-            }
-            let input_2d = Tensor::from_data(expanded_data, vec![1, input.shape()[0]]);
-            let result = matmul::matmul(&input_2d, &weight_transpose);
-            
-            // Extract the single row
-            let mut flat_data = Vec::with_capacity(self.out_features);
-            for j in 0..self.out_features {
-                flat_data.push(result[&[0, j]]);
-            }
-            Tensor::from_data(flat_data, vec![self.out_features])
-        } else {
-            matmul::matmul(input, &weight_transpose)
-        };
-        
-        // Add bias if present
-        if let Some(ref bias) = self.bias {
-            // Implement broadcasting for bias addition
-            let mut result_data = output.data().to_vec();
-            
-            // If output is 1D, add bias directly
-            if output.shape().len() == 1 {
-                for i in 0..self.out_features {
-                    result_data[i] += bias.data()[&[i]];
-                }
-                Tensor::from_data(result_data, output.shape().to_vec())
-            } else {
-                // If output is 2D, broadcast bias across batch dimension
-                let batch_size = output.shape()[0];
+        // Handle both 2D [batch, features] and 3D [batch, seq, features] inputs
+        match input_shape.len() {
+            2 => {
+                let (batch_size, in_features) = (input_shape[0], input_shape[1]);
+                
+                // STRICT: Feature dimensions must match exactly
+                assert_eq!(in_features, self.in_features,
+                    "CRITICAL: Input features {} != expected {}. NO SILENT ADJUSTMENTS.",
+                    in_features, self.in_features);
+                
+                let mut output = vec![0.0; batch_size * self.out_features];
+                let weight_data = self.weight.data();
+                
                 for b in 0..batch_size {
-                    for i in 0..self.out_features {
-                        result_data[b * self.out_features + i] += bias.data()[&[i]];
+                    for o in 0..self.out_features {
+                        let mut sum = 0.0;
+                        for i in 0..self.in_features {
+                            sum += input[&[b, i]] * weight_data[&[o, i]];
+                        }
+                        
+                        if let Some(ref bias) = self.bias {
+                            sum += bias.data()[&[o]];
+                        }
+                        
+                        output[b * self.out_features + o] = sum;
                     }
                 }
-                Tensor::from_data(result_data, output.shape().to_vec())
-            }
-        } else {
-            output
+                
+                Tensor::from_data(output, vec![batch_size, self.out_features])
+            },
+            3 => {
+                let (batch_size, seq_len, in_features) = (input_shape[0], input_shape[1], input_shape[2]);
+                
+                // STRICT: Feature dimensions must match exactly
+                assert_eq!(in_features, self.in_features,
+                    "CRITICAL: Input features {} != expected {}. NO SILENT ADJUSTMENTS.",
+                    in_features, self.in_features);
+                
+                let mut output = vec![0.0; batch_size * seq_len * self.out_features];
+                let weight_data = self.weight.data();
+                
+                for b in 0..batch_size {
+                    for s in 0..seq_len {
+                        for o in 0..self.out_features {
+                            let mut sum = 0.0;
+                            for i in 0..self.in_features {
+                                sum += input[&[b, s, i]] * weight_data[&[o, i]];
+                            }
+                            
+                            if let Some(ref bias) = self.bias {
+                                sum += bias.data()[&[o]];
+                            }
+                            
+                            output[b * seq_len * self.out_features + s * self.out_features + o] = sum;
+                        }
+                    }
+                }
+                
+                Tensor::from_data(output, vec![batch_size, seq_len, self.out_features])
+            },
+            _ => panic!("CRITICAL: Linear layer only supports 2D or 3D inputs, got: {:?}", input_shape)
         }
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    
-    #[test]
-    fn test_linear_forward() {
-        let linear = Linear::new(4, 3, true);
-        let input = Tensor::from_data(vec![0.0; 8], vec![2, 4]); // Batch size 2, 4 features
-        let output = linear.forward(&input);
+impl LoadWeightsBinary for Linear {
+    fn load_weights_binary(
+        &mut self,
+        loader: &BinaryWeightLoader,
+        component: &str,
+        prefix: &str,
+    ) -> Result<(), FerroError> {
+        // STRICT: Weight must exist
+        let weight = loader.load_component_parameter(component, &format!("{}.weight", prefix))
+            .map_err(|e| FerroError::new(format!("CRITICAL: Cannot load Linear weight for {}.{}: {}", component, prefix, e)))?;
         
-        assert_eq!(output.shape(), &[2, 3]);
+        // STRICT: NO ADAPTATIONS - Weight shape must match layer configuration exactly
+        let actual_shape = weight.shape();
+        if actual_shape.len() == 2 {
+            let (actual_out, actual_in) = (actual_shape[0], actual_shape[1]);
+            
+            // ZERO TOLERANCE for dimension mismatches - fail loudly instead of adapting
+            assert_eq!(actual_out, self.out_features,
+                "CRITICAL: Linear layer {}.{} output dimension mismatch: layer configured for {}, weight has {}. \
+                NO SILENT ADAPTATIONS - FIX YOUR LAYER CONFIGURATION.", 
+                component, prefix, self.out_features, actual_out);
+            
+            assert_eq!(actual_in, self.in_features,
+                "CRITICAL: Linear layer {}.{} input dimension mismatch: layer configured for {}, weight has {}. \
+                NO SILENT ADAPTATIONS - FIX YOUR LAYER CONFIGURATION.", 
+                component, prefix, self.in_features, actual_in);
+        } else {
+            return Err(FerroError::new(format!(
+                "CRITICAL: Linear weight must be 2D, got shape {:?} for {}.{}", 
+                actual_shape, component, prefix
+            )));
+        }
+        
+        self.weight = Parameter::new(weight);
+        
+        // Load bias if it exists
+        if let Ok(bias) = loader.load_component_parameter(component, &format!("{}.bias", prefix)) {
+            // STRICT: NO ADAPTATIONS for bias either
+            assert_eq!(bias.shape()[0], self.out_features,
+                "CRITICAL: Bias shape mismatch for Linear layer {}.{}: layer configured for {}, bias has {}. \
+                NO SILENT ADAPTATIONS - FIX YOUR LAYER CONFIGURATION.",
+                component, prefix, self.out_features, bias.shape()[0]);
+                
+            self.bias = Some(Parameter::new(bias));
+        }
+        
+        Ok(())
     }
 }

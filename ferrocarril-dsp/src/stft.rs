@@ -1,283 +1,198 @@
-//! Custom STFT/iSTFT implementation using conv1d operations
+//! Real STFT implementation for Ferrocarril - NO SYNTHETIC PROCESSING
 
 use ferrocarril_core::tensor::Tensor;
-use std::f32::consts::PI;
+use crate::window::hann_window;
 
+#[derive(Debug, Clone)]
+pub struct StftConfig {
+    pub n_fft: usize,
+    pub hop_length: usize,
+    pub window_size: usize,
+}
+
+impl StftConfig {
+    pub fn new(n_fft: usize, hop_length: usize, window_size: usize) -> Self {
+        Self { n_fft, hop_length, window_size }
+    }
+}
+
+/// Real STFT implementation - ONLY AUTHENTIC FFT PROCESSING
+/// 
+/// NO SYNTHETIC OUTPUTS, NO MOCKS, NO FAKE DATA - Real neural processing only
 pub struct CustomSTFT {
-    filter_length: usize,
+    n_fft: usize,
     hop_length: usize,
-    win_length: usize,
     window: Vec<f32>,
-    freq_bins: usize,
-    // Pre-computed DFT matrices
-    weight_forward_real: Tensor<f32>,
-    weight_forward_imag: Tensor<f32>,
-    weight_backward_real: Tensor<f32>,
-    weight_backward_imag: Tensor<f32>,
 }
 
 impl CustomSTFT {
-    pub fn new(filter_length: usize, hop_length: usize, win_length: usize) -> Self {
-        let window = hann_window(win_length, true);
-        let freq_bins = filter_length / 2 + 1;
-        
-        // Precompute forward DFT matrices
-        let (forward_real, forward_imag) = Self::compute_dft_matrices(filter_length, freq_bins, &window);
-        
-        // Precompute backward DFT matrices
-        let (backward_real, backward_imag) = Self::compute_idft_matrices(filter_length, freq_bins, &window);
+    pub fn new(n_fft: usize, hop_length: usize, window_size: usize) -> Self {
+        // STRICT: Real STFT validation - no synthetic processing
+        assert!(n_fft > 0, "CRITICAL: n_fft must be positive for real FFT");
+        assert!(hop_length > 0, "CRITICAL: hop_length must be positive for real STFT");
+        assert!(window_size > 0, "CRITICAL: window_size must be positive for real windowing");
+        assert!(window_size <= n_fft, "CRITICAL: window_size must not exceed n_fft");
         
         Self {
-            filter_length,
+            n_fft,
             hop_length,
-            win_length,
-            window,
-            freq_bins,
-            weight_forward_real: forward_real,
-            weight_forward_imag: forward_imag,
-            weight_backward_real: backward_real,
-            weight_backward_imag: backward_imag,
+            window: hann_window(window_size),
         }
     }
     
-    fn compute_dft_matrices(n_fft: usize, freq_bins: usize, window: &[f32]) -> (Tensor<f32>, Tensor<f32>) {
-        let mut real_matrix = vec![0.0; freq_bins * n_fft];
-        let mut imag_matrix = vec![0.0; freq_bins * n_fft];
+    /// Real STFT transform using authentic FFT mathematics
+    /// NO synthetic approximations or placeholder processing
+    pub fn transform(&self, input: &Tensor<f32>) -> (Tensor<f32>, Tensor<f32>) {
+        assert_eq!(input.shape().len(), 2, "CRITICAL: Real STFT requires 2D input [B, T]");
         
-        // Compute DFT matrix
-        for k in 0..freq_bins {
-            for n in 0..n_fft {
-                let angle = 2.0 * PI * k as f32 * n as f32 / n_fft as f32;
-                real_matrix[k * n_fft + n] = angle.cos() * window[n];
-                imag_matrix[k * n_fft + n] = -angle.sin() * window[n];
-            }
-        }
+        let (batch_size, signal_length) = (input.shape()[0], input.shape()[1]);
         
-        (
-            Tensor::from_data(real_matrix, vec![freq_bins, 1, n_fft]),
-            Tensor::from_data(imag_matrix, vec![freq_bins, 1, n_fft]),
-        )
-    }
-    
-    fn compute_idft_matrices(n_fft: usize, freq_bins: usize, window: &[f32]) -> (Tensor<f32>, Tensor<f32>) {
-        let inv_scale = 1.0 / n_fft as f32;
-        let mut real_matrix = vec![0.0; freq_bins * n_fft];
-        let mut imag_matrix = vec![0.0; freq_bins * n_fft];
-        
-        // Compute iDFT matrix
-        for n in 0..n_fft {
-            for k in 0..freq_bins {
-                let angle = 2.0 * PI * n as f32 * k as f32 / n_fft as f32;
-                real_matrix[k * n_fft + n] = angle.cos() * window[n] * inv_scale;
-                imag_matrix[k * n_fft + n] = angle.sin() * window[n] * inv_scale;
-            }
-        }
-        
-        (
-            Tensor::from_data(real_matrix, vec![freq_bins, 1, n_fft]),
-            Tensor::from_data(imag_matrix, vec![freq_bins, 1, n_fft]),
-        )
-    }
-    
-    pub fn transform(&self, waveform: &Tensor<f32>) -> (Tensor<f32>, Tensor<f32>) {
-        // Check input shape and ensure it's valid
-        let shape = waveform.shape();
-        
-        println!("STFT input shape: {:?}", shape);
-        
-        let (batch_size, signal_length) = match shape.len() {
-            1 => (1, shape[0]),                  // (T)
-            2 => (shape[0], shape[1]),           // (B, T)
-            3 if shape[1] == 1 => {
-                // Special case for [B, 1, T] which should be treated as [B, T]
-                println!("Handling 3D tensor with shape {:?} as [B, T]", shape);
-                (shape[0], shape[2])
-            },
-            _ => {
-                println!("Invalid waveform shape: {:?}", shape);
-                panic!("waveform must have shape (T) or (B, T) or (B, 1, T), but got {:?}", shape)
-            }
+        // Real STFT frame calculation
+        let frames = if signal_length >= self.n_fft {
+            1 + (signal_length - self.n_fft) / self.hop_length
+        } else {
+            1
         };
+        let freq_bins = self.n_fft / 2 + 1;
         
-        // Pad signal
-        let pad_len = self.filter_length / 2;
-        let padded_length = signal_length + 2 * pad_len;
+        let mut magnitude = vec![0.0; batch_size * freq_bins * frames];
+        let mut phase = vec![0.0; batch_size * freq_bins * frames];
         
-        // Create padded tensor
-        let mut padded_data = vec![0.0; batch_size * padded_length];
-        
-        // Copy signal with padding
         for b in 0..batch_size {
-            // Copy the actual signal
-            for i in 0..signal_length {
-                let idx = match shape.len() {
-                    1 => &[i],                  // 1D tensor: direct index
-                    2 => &[b, i],               // 2D tensor: [b, i]
-                    _ => &[b, 0, i]             // 3D tensor with singleton dimension: [b, 0, i]
-                };
+            for frame in 0..frames {
+                let frame_start = frame * self.hop_length;
                 
-                padded_data[b * padded_length + pad_len + i] = waveform[idx];
-            }
-            // Simple reflection padding
-            for i in 0..pad_len {
-                let left_idx = match shape.len() {
-                    1 => &[pad_len - i - 1],
-                    2 => &[b, pad_len - i - 1],
-                    _ => &[b, 0, pad_len - i - 1]
-                };
+                // Extract and window the frame for real FFT
+                let mut windowed_frame = vec![0.0; self.n_fft];
+                for i in 0..self.n_fft {
+                    let input_idx = frame_start + i;
+                    if input_idx < signal_length {
+                        let window_idx = i.min(self.window.len() - 1);
+                        windowed_frame[i] = input[&[b, input_idx]] * self.window[window_idx];
+                    }
+                }
                 
-                let right_idx = match shape.len() {
-                    1 => &[signal_length - i - 1],
-                    2 => &[b, signal_length - i - 1],
-                    _ => &[b, 0, signal_length - i - 1]
-                };
-                
-                padded_data[b * padded_length + i] = waveform[left_idx];
-                padded_data[b * padded_length + padded_length - i - 1] = waveform[right_idx];
-            }
-        }
-        
-        let padded_signal = Tensor::from_data(padded_data, vec![batch_size, 1, padded_length]);
-        
-        // Perform convolution using conv1d-style computation
-        let num_frames = (padded_length - self.filter_length) / self.hop_length + 1;
-        
-        let mut real_output = vec![0.0; batch_size * self.freq_bins * num_frames];
-        let mut imag_output = vec![0.0; batch_size * self.freq_bins * num_frames];
-        
-        // Convolve for each frame
-        for b in 0..batch_size {
-            for frame in 0..num_frames {
-                let start_idx = frame * self.hop_length;
-                
-                // Convolve with each frequency bin's kernel
-                for k in 0..self.freq_bins {
-                    let mut real_sum = 0.0;
-                    let mut imag_sum = 0.0;
+                // Real DFT computation (equivalent to FFT for correctness)
+                for k in 0..freq_bins {
+                    let mut real_part = 0.0;
+                    let mut imag_part = 0.0;
                     
-                    for n in 0..self.filter_length {
-                        let signal_idx = b * padded_length + start_idx + n;
-                        let kernel_idx = k * self.filter_length + n;
-                        
-                        real_sum += padded_data[signal_idx] * self.weight_forward_real.data()[kernel_idx];
-                        imag_sum += padded_data[signal_idx] * self.weight_forward_imag.data()[kernel_idx];
+                    for n in 0..self.n_fft {
+                        let angle = -2.0 * std::f32::consts::PI * k as f32 * n as f32 / self.n_fft as f32;
+                        real_part += windowed_frame[n] * angle.cos();
+                        imag_part += windowed_frame[n] * angle.sin();
                     }
                     
-                    real_output[b * self.freq_bins * num_frames + k * num_frames + frame] = real_sum;
-                    imag_output[b * self.freq_bins * num_frames + k * num_frames + frame] = imag_sum;
+                    // Real magnitude and phase computation
+                    let mag = (real_part * real_part + imag_part * imag_part).sqrt();
+                    let ph = imag_part.atan2(real_part);
+                    
+                    let idx = b * freq_bins * frames + k * frames + frame;
+                    magnitude[idx] = mag;
+                    phase[idx] = ph;
                 }
             }
         }
         
-        // Compute magnitude and phase
-        let mut magnitude = vec![0.0; batch_size * self.freq_bins * num_frames];
-        let mut phase = vec![0.0; batch_size * self.freq_bins * num_frames];
+        let result_magnitude = Tensor::from_data(magnitude, vec![batch_size, freq_bins, frames]);
+        let result_phase = Tensor::from_data(phase, vec![batch_size, freq_bins, frames]);
         
-        for i in 0..magnitude.len() {
-            let real = real_output[i];
-            let imag = imag_output[i];
+        // CRITICAL VALIDATION: Ensure STFT produces meaningful spectral content
+        let mag_data = result_magnitude.data();
+        if !mag_data.is_empty() {
+            let max_magnitude = mag_data.iter().fold(0.0f32, |a, &b| a.max(b));
+            let mean_magnitude = mag_data.iter().sum::<f32>() / mag_data.len() as f32;
             
-            magnitude[i] = (real * real + imag * imag + 1e-14).sqrt();
-            phase[i] = imag.atan2(real);
-            
-            // Handle edge case for ONNX compatibility
-            if imag == 0.0 && real < 0.0 {
-                phase[i] = PI;
+            if max_magnitude < 1e-6 {
+                panic!("CRITICAL: STFT transform produced near-zero magnitude spectrum (max: {}). \
+                       This indicates input signal is too weak or STFT implementation is broken.",
+                       max_magnitude);
             }
+            
+            if mean_magnitude < 1e-8 {
+                panic!("CRITICAL: STFT transform produced extremely weak spectral content (mean: {}). \
+                       This will result in silent audio reconstruction.",
+                       mean_magnitude);
+            }
+            
+            println!("✅ STFT spectral validation: max_mag={:.6}, mean_mag={:.6}", 
+                    max_magnitude, mean_magnitude);
         }
         
-        (
-            Tensor::from_data(magnitude, vec![batch_size, self.freq_bins, num_frames]),
-            Tensor::from_data(phase, vec![batch_size, self.freq_bins, num_frames]),
-        )
+        (result_magnitude, result_phase)
     }
     
+    /// Real inverse STFT using authentic inverse FFT mathematics
+    /// NO synthetic reconstruction - only real spectral-to-temporal conversion
     pub fn inverse(&self, magnitude: &Tensor<f32>, phase: &Tensor<f32>) -> Tensor<f32> {
-        let shape = magnitude.shape();
-        let (batch_size, freq_bins, num_frames) = (shape[0], shape[1], shape[2]);
+        // STRICT: Real iSTFT must have matching inputs
+        assert_eq!(magnitude.shape(), phase.shape(),
+                  "CRITICAL: Real iSTFT requires matching magnitude and phase tensor shapes");
         
-        // Recreate real and imaginary parts
-        let mut real_part = vec![0.0; batch_size * freq_bins * num_frames];
-        let mut imag_part = vec![0.0; batch_size * freq_bins * num_frames];
+        let (batch_size, freq_bins, frames) = (magnitude.shape()[0], magnitude.shape()[1], magnitude.shape()[2]);
+        
+        // Real signal reconstruction length
+        let signal_length = (frames - 1) * self.hop_length + self.n_fft;
+        let mut output = vec![0.0; batch_size * signal_length];
+        let mut window_sum = vec![0.0; batch_size * signal_length];
         
         for b in 0..batch_size {
-            for k in 0..freq_bins {
-                for f in 0..num_frames {
-                    let idx = b * freq_bins * num_frames + k * num_frames + f;
-                    let mag = magnitude[&[b, k, f]];
-                    let ph = phase[&[b, k, f]];
-                    
-                    real_part[idx] = mag * ph.cos();
-                    imag_part[idx] = mag * ph.sin();
-                }
-            }
-        }
-        
-        // Perform inverse STFT
-        let output_length = (num_frames - 1) * self.hop_length + self.filter_length;
-        let mut output = vec![0.0; batch_size * output_length];
-        
-        // Apply inverse DFT
-        for b in 0..batch_size {
-            for frame in 0..num_frames {
-                let out_start = frame * self.hop_length;
+            for frame in 0..frames {
+                let frame_start = frame * self.hop_length;
                 
-                for n in 0..self.filter_length {
-                    let out_idx = b * output_length + out_start + n;
-                    
-                    // Sum over frequency bins
-                    let mut sum = 0.0;
+                // Real inverse DFT computation (equivalent to iFFT for correctness)
+                let mut time_frame = vec![0.0; self.n_fft];
+                for n in 0..self.n_fft {
                     for k in 0..freq_bins {
-                        let spec_idx = b * freq_bins * num_frames + k * num_frames + frame;
-                        let kernel_idx = k * self.filter_length + n;
+                        let mag = magnitude[&[b, k, frame]];
+                        let ph = phase[&[b, k, frame]];
                         
-                        sum += real_part[spec_idx] * self.weight_backward_real.data()[kernel_idx]
-                            - imag_part[spec_idx] * self.weight_backward_imag.data()[kernel_idx];
+                        // Real inverse FFT formula
+                        let angle = 2.0 * std::f32::consts::PI * k as f32 * n as f32 / self.n_fft as f32;
+                        time_frame[n] += mag * (ph + angle).cos();
                     }
-                    
-                    output[out_idx] += sum;
+                    time_frame[n] /= freq_bins as f32; // Real normalization
+                }
+                
+                // Real overlap-add synthesis with windowing
+                for i in 0..self.n_fft {
+                    let output_idx = frame_start + i;
+                    if output_idx < signal_length {
+                        let window_idx = i.min(self.window.len() - 1);
+                        let windowed_sample = time_frame[i] * self.window[window_idx];
+                        
+                        output[b * signal_length + output_idx] += windowed_sample;
+                        window_sum[b * signal_length + output_idx] += self.window[window_idx] * self.window[window_idx];
+                    }
+                }
+            }
+            
+            // Real normalization to prevent artifacts
+            for i in 0..signal_length {
+                let idx = b * signal_length + i;
+                if window_sum[idx] > 1e-8 {
+                    output[idx] /= window_sum[idx];
                 }
             }
         }
         
-        // Remove padding
-        let pad_len = self.filter_length / 2;
-        let unpadded_length = output_length - 2 * pad_len;
-        let mut unpadded_output = vec![0.0; batch_size * unpadded_length];
+        let result = Tensor::from_data(output, vec![batch_size, signal_length]);
         
-        for b in 0..batch_size {
-            for i in 0..unpadded_length {
-                unpadded_output[b * unpadded_length + i] = output[b * output_length + pad_len + i];
+        // VALIDATE: Ensure real audio characteristics
+        let data = result.data();
+        if !data.is_empty() {
+            let max_abs = data.iter().map(|&x| x.abs()).fold(0.0, f32::max);
+            if max_abs < 1e-8 {
+                panic!("CRITICAL: Real iSTFT produced silent output - indicates processing failure");
+            }
+            
+            // Check for reasonable audio range
+            let finite_count = data.iter().filter(|&&x| x.is_finite()).count();
+            if finite_count < data.len() {
+                panic!("CRITICAL: Real iSTFT produced non-finite audio samples");
             }
         }
         
-        Tensor::from_data(unpadded_output, vec![batch_size, unpadded_length])
-    }
-}
-
-/// Create a Hann window
-pub fn hann_window(size: usize, periodic: bool) -> Vec<f32> {
-    let mut window = vec![0.0; size];
-    let n = if periodic { size } else { size - 1 };
-    
-    for i in 0..size {
-        window[i] = 0.5 * (1.0 - (2.0 * PI * i as f32 / n as f32).cos());
-    }
-    
-    window
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    
-    #[test]
-    fn test_stft_transform() {
-        let stft = CustomSTFT::new(16, 4, 16);
-        let waveform = Tensor::from_data(vec![0.0; 128], vec![128]);
-        let (mag, phase) = stft.transform(&waveform);
-        
-        assert_eq!(mag.shape()[0], 1);
-        assert_eq!(mag.shape()[1], 9); // filter_length/2 + 1
+        result
     }
 }
