@@ -157,15 +157,12 @@ impl LoadWeightsBinary for FeedForward {
         component_path: &str,
         module_path: &str,
     ) -> Result<(), FerroError> {
-        println!("Loading FeedForward weights for {}.{}", component_path, module_path);
-        
         // Load first linear layer (ffn) weights
         let ffn_weight_path = format!(
             "{}.{}.ffn.weight",
             component_path,
             module_path
         );
-        println!("Loading ffn weight from: {}", ffn_weight_path);
         let ffn_weight_tensor = loader.load_tensor(&ffn_weight_path)?;
         
         // Validate shape
@@ -184,7 +181,6 @@ impl LoadWeightsBinary for FeedForward {
             component_path,
             module_path
         );
-        println!("Loading ffn bias from: {}", ffn_bias_path);
         let ffn_bias_tensor = loader.load_tensor(&ffn_bias_path)?;
         
         // Validate shape
@@ -202,7 +198,6 @@ impl LoadWeightsBinary for FeedForward {
             component_path,
             module_path
         );
-        println!("Loading ffn output weight from: {}", ffn_output_weight_path);
         let ffn_output_weight_tensor = loader.load_tensor(&ffn_output_weight_path)?;
         
         // Validate shape
@@ -221,7 +216,6 @@ impl LoadWeightsBinary for FeedForward {
             component_path,
             module_path
         );
-        println!("Loading ffn output bias from: {}", ffn_output_bias_path);
         let ffn_output_bias_tensor = loader.load_tensor(&ffn_output_bias_path)?;
         
         // Validate shape

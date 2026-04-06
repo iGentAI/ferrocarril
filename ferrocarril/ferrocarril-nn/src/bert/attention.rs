@@ -63,9 +63,6 @@ impl LinearProjection {
         let effective_input_dim = input_dim.min(weight_in_dim);
         let effective_output_dim = weight_out_dim.min(bias_dim);
         
-        println!("LinearProjection dimensions: input={}, weight={}x{}, bias={}, output={}",
-            input_dim, weight_out_dim, weight_in_dim, bias_dim, effective_output_dim);
-        
         // Create output data array
         let mut output_data = vec![0.0; batch_size * seq_len * effective_output_dim];
         
@@ -101,8 +98,6 @@ impl LinearProjection {
         module_path: &str,
         name: &str,
     ) -> Result<(), FerroError> {
-        println!("Loading LinearProjection {}...", name);
-        
         // Load weights
         let weight_path = format!(
             "{}.{}.{}.weight",
@@ -110,9 +105,7 @@ impl LinearProjection {
             module_path,
             name
         );
-        println!("Loading weight from: {}", weight_path);
         *self.weight.data_mut() = loader.load_tensor(&weight_path)?;
-        println!("{} weight loaded with shape: {:?}", name, self.weight.data().shape());
         
         // Load bias
         let bias_path = format!(
@@ -121,9 +114,7 @@ impl LinearProjection {
             module_path,
             name
         );
-        println!("Loading bias from: {}", bias_path);
         *self.bias.data_mut() = loader.load_tensor(&bias_path)?;
-        println!("{} bias loaded with shape: {:?}", name, self.bias.data().shape());
         
         Ok(())
     }
@@ -215,16 +206,10 @@ impl MultiHeadAttention {
         let seq_len = shape[1];
         let input_hidden_size = shape[2];
         
-        println!("MultiHeadAttention forward: input shape={:?}", shape);
-        
         // Project inputs to query, key, and value
         let query_layer = self.query.forward(hidden_states);
         let key_layer = self.key.forward(hidden_states);
         let value_layer = self.value.forward(hidden_states);
-        
-        println!("Query layer shape: {:?}", query_layer.shape());
-        println!("Key layer shape: {:?}", key_layer.shape());
-        println!("Value layer shape: {:?}", value_layer.shape());
         
         // Get actual projection dimensions
         let projection_dim = query_layer.shape()[2]; // Should be the same for query, key, value
@@ -232,8 +217,6 @@ impl MultiHeadAttention {
         // Adjust the head size if needed
         let adjusted_num_heads = if self.num_attention_heads == 0 { 1 } else { self.num_attention_heads };
         let adjusted_head_size = projection_dim / adjusted_num_heads;
-        
-        println!("Adjusted attention heads: {}, head size: {}", adjusted_num_heads, adjusted_head_size);
         
         // Reshape query, key, and value to separate attention heads
         // Original shape: [batch_size, seq_len, hidden_size]
@@ -488,7 +471,6 @@ impl MultiHeadAttention {
         );
         
         // Apply layer normalization
-        println!("Applying layer normalization to shape: {:?}", residual_output.shape());
         let normalized_output = self.layer_norm.forward(&residual_output);
         
         normalized_output
@@ -502,8 +484,6 @@ impl LoadWeightsBinary for MultiHeadAttention {
         component_path: &str,
         module_path: &str,
     ) -> Result<(), FerroError> {
-        println!("Loading MultiHeadAttention weights for component={}, module={}", component_path, module_path);
-        
         // Load query, key, value, output projections
         self.query.load_weights_binary(loader, component_path, module_path, "query")
             .map_err(|e| FerroError::new(format!("Failed to load query weights: {}", e)))?;

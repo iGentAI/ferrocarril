@@ -6,7 +6,6 @@ use ferrocarril_core::{Config, tensor::Tensor, PhonesisG2P};
 use ferrocarril_dsp;
 use ferrocarril_nn::vocoder::{Generator, Decoder};
 use std::error::Error;
-use std::path::Path;
 use clap::{Parser, Subcommand};
 use crate::model::FerroModel;
 
@@ -50,8 +49,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     
     match cli.command {
         Some(Commands::Infer { text, output, model, voice, speed }) => {
-            // Load configuration
-            let config = Config::from_json("config.json")?;
+            let config_path = match &model {
+                Some(model_path) => format!("{}/config.json", model_path),
+                None => "config.json".to_string(),
+            };
+            let config = Config::from_json(&config_path)?;
             
             // Load model
             let model = match model {
@@ -65,7 +67,7 @@ fn main() -> Result<(), Box<dyn Error>> {
                         return Err("Binary weight loading requires the 'weights' feature".into());
                     }
                 }
-                None => FerroModel::load("config.json", config)?
+                None => FerroModel::load(&config_path, config)?
             };
             
             // Perform inference

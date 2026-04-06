@@ -230,20 +230,16 @@ impl LoadWeightsBinary for Linear {
         component: &str,
         prefix: &str
     ) -> Result<(), FerroError> {
-        println!("Loading Linear weights for {}.{}", component, prefix);
-        
         // Load weight - fail immediately if missing
         let weight_path = format!("{}.weight", prefix);
         let weight = loader.load_component_parameter(component, &weight_path)?;
         self.set_weight(&weight)?;
-        println!("Weight tensor loaded successfully for {}.{}", component, prefix);
-        
+
         // Load bias if present
         if self.bias.is_some() {
             let bias_path = format!("{}.bias", prefix);
             let bias = loader.load_component_parameter(component, &bias_path)?;
             self.set_bias(&bias)?;
-            println!("Bias tensor loaded successfully for {}.{}", component, prefix);
         }
         
         Ok(())

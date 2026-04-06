@@ -59,9 +59,7 @@ impl FerroModel {
     fn create_alignment_from_durations(&self, durations: &[usize]) -> Tensor<f32> {
         let seq_len = durations.len();
         let total_frames: usize = durations.iter().sum();
-        
-        println!("Creating alignment matrix with shape [seq_len={}, total_frames={}]", seq_len, total_frames);
-        
+
         // This matches Kokoro's approach:
         // First create indices by repeating position indices according to durations
         // Similar to torch.repeat_interleave(torch.arange(input_ids.shape[1], device=self.device), pred_dur)
@@ -125,27 +123,6 @@ impl FerroModel {
         }
         
         alignment
-    }
-
-    /// Create a new model with default initialization
-    pub fn new(config: Config) -> Result<Self, Box<dyn Error>> {
-        // Initialize G2P with the English language
-        let g2p = G2PHandler::new("en-us")?;
-        
-        Ok(Self { 
-            config,
-            g2p,
-            #[cfg(feature = "weights")]
-            text_encoder: None,
-            #[cfg(feature = "weights")]
-            bert: None,
-            #[cfg(feature = "weights")]
-            bert_encoder: None,
-            #[cfg(feature = "weights")]
-            prosody_predictor: None,
-            #[cfg(feature = "weights")]
-            decoder: None,
-        })
     }
 
     /// Load a model from PyTorch weights (not fully implemented)
@@ -281,11 +258,8 @@ impl FerroModel {
     /// Run inference to generate audio from text
     pub fn infer(&self, text: &str) -> Result<Vec<f32>, Box<dyn Error>> {
         // Convert text to phonemes using our G2P handler
-        println!("Converting text to phonemes using G2P handler...");
         let g2p_result = self.g2p.convert(text);
-        
-        println!("Phonetic representation: {}", g2p_result.phonemes);
-        
+
         // Default voice style embedding (use a default voice if no voice specified)
         let default_voice_embedding = Tensor::from_data(
             vec![0.0; self.config.style_dim * 2], // Reference + style parts as in Kokoro
@@ -298,9 +272,6 @@ impl FerroModel {
     
     /// Implement the full inference pipeline
     pub fn infer_with_phonemes(&self, phonemes: &str, voice_embedding: &Tensor<f32>, speed_factor: f32) -> Result<Vec<f32>, Box<dyn Error>> {
-        println!("Using voice embedding of shape {:?}", voice_embedding.shape());
-        println!("Speed factor: {}", speed_factor);
-        
         #[cfg(feature = "weights")]
         match (&self.text_encoder, &self.prosody_predictor, &self.decoder, &self.bert, &self.bert_encoder) {
             (Some(text_encoder), Some(prosody_predictor), Some(decoder), Some(bert), Some(bert_encoder)) => {
@@ -320,10 +291,8 @@ impl FerroModel {
                     if let Some(&id) = self.config.vocab.get(&ch) {
                         token_ids.push(id as i64);
                     } else {
-                        println!(
-                            "Warning: Phoneme {:?} not in vocabulary, skipping",
-                            ch
-                        );
+                        // Unknown phoneme: skip silently. The G2P layer
+                        // owns vocabulary correctness.
                     }
                 }
 
@@ -332,8 +301,7 @@ impl FerroModel {
                 // Create tensor from token IDs
                 let batch_size = 1;
                 let seq_len = token_ids.len();
-                
-                println!("Input sequence length: {}", seq_len);
+
                 if seq_len > 512 {
                     return Err(Box::new(std::io::Error::new(
                         std::io::ErrorKind::InvalidInput,
@@ -358,18 +326,14 @@ impl FerroModel {
                 );
                 
                 // 1. Process input through TextEncoder - expects [B, T] input, outputs [B, C, T]
-                println!("Running TextEncoder...");
                 let t_en = text_encoder.forward(&input_ids_tensor, &input_lengths, &text_mask);
-                println!("TextEncoder output shape: {:?}", t_en.shape());
 
                 // 2. Process input through BERT - expects [B, T] input, outputs [B, T, C]
                 let attention_mask = Tensor::from_data(vec![1i64; batch_size * seq_len], vec![batch_size, seq_len]);
                 let bert_output = bert.forward(&input_ids_tensor, None, Some(&attention_mask));
-                println!("BERT output shape: {:?}", bert_output.shape());
 
                 // 3. Project BERT output - input [B, T, C], output [B, T, hidden_dim]
                 let bert_encoder_output = bert_encoder.forward(&bert_output);
-                println!("BERT encoder output shape: {:?}", bert_encoder_output.shape());
 
                 // 4. Transpose BERT encoder output from [B, T, C] to [B, C, T] to match TextEncoder
                 let (batch_size, seq_len, hidden_dim) = (
@@ -388,7 +352,6 @@ impl FerroModel {
                     }
                 }
                 let d_en = Tensor::from_data(d_en_bct_data, vec![batch_size, hidden_dim, seq_len]);
-                println!("BERT encoder output transposed to [B, C, T]: {:?}", d_en.shape());
 
                 // 5. Split voice embedding properly.
                 //
@@ -457,9 +420,6 @@ impl FerroModel {
                     );
                 };
 
-                println!("Reference embedding shape: {:?}", ref_embedding.shape());
-                println!("Style embedding shape: {:?}", style_embedding.shape());
-
                 // 6. Create temporary identity alignment for duration prediction
                 let mut temp_alignment_data = vec![0.0; seq_len * seq_len];
                 for i in 0..seq_len {
@@ -493,11 +453,7 @@ impl FerroModel {
                     durations[pos] = std::cmp::max(1, duration);
                 }
 
-                println!("Calculated durations: {:?}", durations);
                 let total_frames: usize = durations.iter().sum();
-
-                // 9. Create alignment matrix based on durations
-                println!("Creating alignment matrix with shape [seq_len={}, total_frames={}]", seq_len, total_frames);
                 let alignment_matrix = self.create_alignment_from_durations(&durations);
 
                 // 10. Get aligned encoder states with proper alignment
@@ -507,16 +463,13 @@ impl FerroModel {
                     &text_mask, 
                     &alignment_matrix
                 ).map_err(|e| Box::new(e) as Box<dyn Error>)?;
-                println!("Aligned encoder states shape: {:?}", en.shape());
 
                 // 11. Predict F0 and noise.
                 //
                 // ProsodyPredictor::predict_f0_noise expects `en` in
                 // `[B, d_model + style_dim, F]` format and transposes to BFC internally.
-                println!("Calling predict_f0_noise with en shape {:?}", en.shape());
                 let (f0_pred, n_pred) = prosody_predictor.predict_f0_noise(&en, &style_embedding)
                     .map_err(|e| Box::new(e) as Box<dyn Error>)?;
-                println!("F0 shape: {:?}, Noise shape: {:?}", f0_pred.shape(), n_pred.shape());
 
                 // 13. Create ASR tensor = t_en @ alignment_matrix
                 // t_en is [B, C, T], alignment_matrix is [T, F]
@@ -538,10 +491,8 @@ impl FerroModel {
                 }
 
                 let asr = Tensor::from_data(asr_data, vec![batch_size, hidden_dim, total_frames]);
-                println!("ASR tensor shape: {:?}", asr.shape());
 
                 // 14. Generate audio
-                println!("Calling decoder.forward");
                 let audio_result = decoder.forward(&asr, &f0_pred, &n_pred, &ref_embedding);
                 let audio = match audio_result {
                     Ok(audio_tensor) => audio_tensor,
@@ -549,11 +500,9 @@ impl FerroModel {
                         return Err(Box::new(e) as Box<dyn Error>);
                     }
                 };
-                println!("Generated audio shape: {:?}", audio.shape());
 
                 // Return audio data
                 let audio_data = audio.data().to_vec();
-                println!("Generated {} audio samples", audio_data.len());
 
                 Ok(audio_data)
             },
@@ -598,11 +547,8 @@ impl FerroModel {
     /// Generate audio from text and a voice embedding
     pub fn infer_with_voice(&self, text: &str, voice_embedding: &Tensor<f32>, speed_factor: f32) -> Result<Vec<f32>, Box<dyn Error>> {
         // Convert text to phonemes using our G2P handler
-        println!("Converting text to phonemes using G2P handler...");
         let g2p_result = self.g2p.convert(text);
-        
-        println!("Phonetic representation: {}", g2p_result.phonemes);
-        
+
         // Use phonemes for inference
         self.infer_with_phonemes(&g2p_result.phonemes, voice_embedding, speed_factor)
     }
@@ -620,15 +566,11 @@ impl FerroModel {
             let weights_dir = std::path::Path::new("../ferrocarril_weights");
             let voices_dir = weights_dir.join("voices");
 
-            println!("Attempting to load voice '{}' from {}", voice_name, voices_dir.display());
             if !voices_dir.exists() {
                 println!("Warning: Voices directory not found at {:?}", voices_dir);
-                println!("Returning a default voice embedding for {}", voice_name);
             } else {
                 let voice_file = voices_dir.join(format!("{}.bin", voice_name));
                 if voice_file.exists() {
-                    println!("Loading voice embedding for {} from {:?}", voice_name, voice_file);
-
                     let voice_data = std::fs::read(voice_file)?;
                     let num_elements = voice_data.len() / 4;
                     let mut voice_flat = vec![0.0f32; num_elements];
@@ -653,11 +595,6 @@ impl FerroModel {
                                     let embed_dim =
                                         shape_array[2].as_u64().unwrap_or(256) as usize;
 
-                                    println!(
-                                        "Voice shape from metadata: [{}, {}, {}]",
-                                        seq_len, batch, embed_dim
-                                    );
-
                                     let expected = seq_len * batch * embed_dim;
                                     if num_elements != expected {
                                         return Err(format!(
@@ -676,10 +613,6 @@ impl FerroModel {
                                         voice_flat,
                                         vec![seq_len, embed_dim],
                                     );
-                                    println!(
-                                        "Loaded voice pack with shape: {:?}",
-                                        voice_tensor.shape()
-                                    );
                                     return Ok(voice_tensor);
                                 }
                             }
@@ -692,271 +625,10 @@ impl FerroModel {
         // Fallback to a zero-initialized embedding with correct shape.
         // Keep the legacy `[1, style_dim*2]` shape so any tests that expect
         // the pre-indexed form still work.
-        println!("Creating default voice embedding for {}", voice_name);
+        println!("Warning: falling back to zero voice embedding for '{}'", voice_name);
         let style_dim = self.config.style_dim;
         let embedding = vec![0.0; style_dim * 2];
         let voice_tensor = Tensor::from_data(embedding, vec![1, style_dim * 2]);
-        println!("Created default voice embedding with shape: {:?}", voice_tensor.shape());
         Ok(voice_tensor)
-    }
-    
-    // Only for testing - enables directly running the inference with a proper alignment matrix
-    #[cfg(feature = "weights")]
-    pub fn infer_with_voice_test(&self, text: &str, voice_embedding: &Tensor<f32>, speed_factor: f32) -> Result<Vec<f32>, Box<dyn Error>> {
-        // Convert text to phonemes using our G2P handler
-        println!("Converting text to phonemes using G2P handler...");
-        let g2p_result = self.g2p.convert(text);
-        println!("Phonetic representation: {}", g2p_result.phonemes);
-        
-        // Extract components
-        let text_encoder = match &self.text_encoder {
-            Some(e) => e,
-            None => return Err("TextEncoder not loaded".into()),
-        };
-        
-        let bert = match &self.bert {
-            Some(b) => b,
-            None => return Err("BERT not loaded".into()),
-        };
-        
-        let bert_encoder = match &self.bert_encoder {
-            Some(be) => be,
-            None => return Err("BERT encoder not loaded".into()),
-        };
-        
-        let prosody_predictor = match &self.prosody_predictor {
-            Some(pp) => pp,
-            None => return Err("ProsodyPredictor not loaded".into()),
-        };
-        
-        let decoder = match &self.decoder {
-            Some(d) => d,
-            None => return Err("Decoder not loaded".into()),
-        };
-        
-        // 1. Convert phonemes to token IDs.
-        let mut token_ids: Vec<i64> = Vec::new();
-        token_ids.push(0); // Start of sequence token <bos>
-
-        for ch in g2p_result.phonemes.chars() {
-            if ch.is_whitespace() {
-                continue;
-            }
-            if let Some(&id) = self.config.vocab.get(&ch) {
-                token_ids.push(id as i64);
-            } else {
-                println!(
-                    "Warning: Phoneme {:?} not in vocabulary, skipping",
-                    ch
-                );
-            }
-        }
-
-        token_ids.push(0); // End of sequence token <eos>
-        
-        // Create tensor from token IDs
-        let batch_size = 1;
-        let seq_len = token_ids.len();
-        
-        println!("Input sequence length: {}", seq_len);
-        if seq_len > 512 {
-            return Err(Box::new(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!("Input sequence too long: {} > 512 tokens", seq_len)
-            )));
-        }
-        
-        // Create input_ids tensor [B, T]
-        let mut input_ids_tensor = Tensor::new(vec![batch_size, seq_len]);
-        for (idx, &id) in token_ids.iter().enumerate() {
-            input_ids_tensor[&[0, idx]] = id as i64;
-        }
-        
-        // Create input_lengths and text_mask
-        let input_lengths = vec![seq_len];
-        
-        // Create text_mask for padding
-        let text_mask = Tensor::from_data(
-            vec![false; batch_size * seq_len],
-            vec![batch_size, seq_len]
-        );
-        
-        // Process through BERT and TextEncoder
-        // Create attention mask for BERT
-        let attention_mask = Tensor::from_data(
-            vec![1i64; batch_size * seq_len], // 1=attend, 0=mask 
-            vec![batch_size, seq_len]
-        );
-        let bert_output = bert.forward(&input_ids_tensor, None, Some(&attention_mask));
-        let d_en_btc = bert_encoder.forward(&bert_output);
-        let t_en = text_encoder.forward(&input_ids_tensor, &input_lengths, &text_mask);
-        
-        // Split voice embedding
-        let style_dim = self.config.style_dim;
-        let mut ref_part_data = vec![0.0; batch_size * style_dim];
-        let mut style_part_data = vec![0.0; batch_size * style_dim];
-        
-        for b in 0..batch_size {
-            for i in 0..style_dim {
-                ref_part_data[b * style_dim + i] = voice_embedding[&[b, i]];
-                style_part_data[b * style_dim + i] = voice_embedding[&[b, i + style_dim]];
-            }
-        }
-        
-        let ref_embedding = Tensor::from_data(ref_part_data, vec![batch_size, style_dim]);
-        let style_embedding = Tensor::from_data(style_part_data, vec![batch_size, style_dim]);
-        
-        // Convert d_en_btc to format needed for prosody processing
-        let mut d_en_bct_data = vec![0.0; batch_size * self.config.hidden_dim * seq_len];
-        for b in 0..batch_size {
-            for t in 0..seq_len {
-                for c in 0..self.config.hidden_dim {
-                    d_en_bct_data[b * self.config.hidden_dim * seq_len + c * seq_len + t] = 
-                        d_en_btc[&[b, t, c]];
-                }
-            }
-        }
-        let d_en = Tensor::from_data(d_en_bct_data, vec![batch_size, self.config.hidden_dim, seq_len]);
-        
-        // Create a separate tensor for duration prediction (d_for_dur)
-        let mut d_transpose_for_dur = vec![0.0; batch_size * self.config.hidden_dim * seq_len];
-        for b in 0..batch_size {
-            for t in 0..seq_len {
-                for h in 0..self.config.hidden_dim {
-                    if t < d_en_btc.shape()[1] && h < d_en_btc.shape()[2] {
-                        d_transpose_for_dur[b * self.config.hidden_dim * seq_len + h * seq_len + t] = 
-                            d_en_btc[&[b, t, h]];
-                    }
-                }
-            }
-        }
-        
-        // Convert to [B, H, T] format
-        let d_for_dur = Tensor::from_data(
-            d_transpose_for_dur,
-            vec![batch_size, self.config.hidden_dim, seq_len]
-        );
-        
-        println!("Debug: d_for_dur shape: {:?}", d_for_dur.shape());
-        
-        // Calculate durations from logits
-        let max_dur = prosody_predictor.max_dur;
-
-        // Get duration predictions (we're mimicking Kokoro's forward_with_tokens method)
-        // First, get durations using a temporary alignment with same shape as text
-        // Create alignment matrix for duration prediction (T×T)
-        let mut temp_alignment_data = vec![0.0; seq_len * seq_len];
-        // Identity matrix - each position attends to itself
-        for i in 0..seq_len {
-            temp_alignment_data[i * seq_len + i] = 1.0;
-        }
-        let temp_alignment = Tensor::from_data(
-            temp_alignment_data, 
-            vec![seq_len, seq_len]
-        );
-
-        // Process d_for_dur through predictor to get durations
-        let (dur_logits, _) = prosody_predictor.forward(&d_for_dur, &style_embedding, &text_mask, &temp_alignment)
-            .map_err(|e| Box::new(e) as Box<dyn Error>)?;
-
-        // Calculate durations from logits (sigmoid + sum + scale)
-        let mut durations = vec![0; seq_len];
-
-        // Iterate over sequence positions
-        for pos in 0..seq_len {
-            let mut duration_sum = 0.0;
-            
-            // Sum sigmoid values across the max_dur dimension
-            for dur_idx in 0..max_dur {
-                if dur_idx < dur_logits.shape()[2] {
-                    let logit = dur_logits[&[0, pos, dur_idx]];
-                    let sigmoid_value = 1.0 / (1.0 + (-logit).exp());
-                    duration_sum += sigmoid_value;
-                }
-            }
-            
-            // Scale by speed factor and round
-            let duration = (duration_sum / speed_factor).round() as usize;
-            durations[pos] = std::cmp::max(1, duration);
-        }
-
-        // Create proper alignment matrix
-        let proper_alignment = self.create_alignment_from_durations(&durations);
-
-        // Get total frames for later use
-        let total_frames: usize = durations.iter().sum();
-        
-        println!("Created proper alignment matrix with shape [{}, {}]", seq_len, proper_alignment.shape()[1]);
-
-        // Run forward pass with proper alignment and d_en (not d_for_dur)
-        let (_, en) = prosody_predictor.forward(&d_en, &style_embedding, &text_mask, &proper_alignment)
-            .map_err(|e| Box::new(e) as Box<dyn Error>)?;
-
-        // Double-check that the style_embedding has the correct dimensions
-        // If not, create a new one with the right dimensions
-        let effective_style_embedding;
-        if style_embedding.shape()[1] != self.config.style_dim {
-            println!("WARNING: style_embedding has incorrect dimensions. Creating a fixed version.");
-            // Create a corrected style embedding
-            let corrected_style_data = vec![0.5; batch_size * self.config.style_dim];
-            effective_style_embedding = Tensor::from_data(
-                corrected_style_data,
-                vec![batch_size, self.config.style_dim]
-            );
-        } else {
-            effective_style_embedding = style_embedding.clone();
-        }
-
-        println!("Calling predict_f0_noise with en shape {:?}, style shape {:?}",
-                 en.shape(), effective_style_embedding.shape());
-
-        // Predict F0 and noise
-        let (f0_pred, n_pred) = prosody_predictor.predict_f0_noise(&en, &effective_style_embedding)
-            .map_err(|e| Box::new(e) as Box<dyn Error>)?;
-        
-        // Create batched alignment
-        let mut batched_alignment = vec![0.0; batch_size * seq_len * total_frames];
-        for i in 0..seq_len * total_frames {
-            batched_alignment[i] = proper_alignment.data()[i];
-        }
-        let pred_aln_trg = Tensor::from_data(
-            batched_alignment,
-            vec![batch_size, seq_len, total_frames]
-        );
-        
-        // ASR tensor
-        let mut asr_data = vec![0.0; batch_size * self.config.hidden_dim * total_frames];
-        for b in 0..batch_size {
-            for h in 0..self.config.hidden_dim {
-                for f in 0..total_frames {
-                    let mut sum = 0.0;
-                    for t in 0..seq_len {
-                        if h < t_en.shape()[1] && t < t_en.shape()[2] && t < pred_aln_trg.shape()[1] && f < pred_aln_trg.shape()[2] {
-                            sum += t_en[&[b, h, t]] * pred_aln_trg[&[b, t, f]];
-                        }
-                    }
-                    
-                    if b * self.config.hidden_dim * total_frames + h * total_frames + f < asr_data.len() {
-                        asr_data[b * self.config.hidden_dim * total_frames + h * total_frames + f] = sum;
-                    }
-                }
-            }
-        }
-        
-        let asr = Tensor::from_data(
-            asr_data,
-            vec![batch_size, self.config.hidden_dim, total_frames]
-        );
-        
-        // Generate audio
-        let audio_result = decoder.forward(&asr, &f0_pred, &n_pred, &ref_embedding);
-        let audio = match audio_result {
-            Ok(audio_tensor) => audio_tensor,
-            Err(e) => {
-                return Err(Box::new(e) as Box<dyn Error>);
-            }
-        };
-        
-        Ok(audio.data().to_vec())
     }
 }

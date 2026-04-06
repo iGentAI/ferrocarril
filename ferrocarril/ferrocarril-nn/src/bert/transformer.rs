@@ -74,15 +74,11 @@ impl AlbertLayer {
         hidden_states: &Tensor<f32>,
         attention_mask: Option<&Tensor<i64>>,
     ) -> Tensor<f32> {
-        println!("AlbertLayer forward: input shape={:?}", hidden_states.shape());
-        
         // Run through self-attention mechanism
         let attention_output = self.attention.forward(hidden_states, attention_mask);
-        println!("Attention output shape: {:?}", attention_output.shape());
-        
+
         // Run through feed-forward network
         let feed_forward_output = self.feed_forward.forward(&attention_output);
-        println!("Feed-forward output shape: {:?}", feed_forward_output.shape());
         
         // Add residual connection
         let shape = hidden_states.shape();
@@ -122,7 +118,6 @@ impl AlbertLayer {
         );
         
         // Apply layer normalization
-        println!("Applying layer norm to shape: {:?}", residual_output.shape());
         self.full_layer_norm.forward(&residual_output)
     }
 }
@@ -134,8 +129,6 @@ impl LoadWeightsBinary for AlbertLayer {
         component_path: &str,
         module_path: &str,
     ) -> Result<(), FerroError> {
-        println!("Loading AlbertLayer for component={}, module={}", component_path, module_path);
-        
         // Load attention - fail if missing
         self.attention.load_weights_binary(loader, component_path, &format!("{}.attention", module_path))?;
         
@@ -191,22 +184,21 @@ impl AlbertLayerGroup {
         attention_mask: Option<&Tensor<i64>>,
         num_hidden_layers: usize,
     ) -> Tensor<f32> {
-        println!("AlbertLayerGroup forward: input shape={:?}, num_layers={}", 
-            hidden_states.shape(), num_hidden_layers);
-            
         let mut layer_output = hidden_states.clone();
-        
+
         // Limit the number of layers to a reasonable maximum to avoid issues
         let max_layers = 24; // Standard BERT/ALBERT usually has 12-24 layers
         let applied_layers = num_hidden_layers.min(max_layers);
-        
+
         if applied_layers < num_hidden_layers {
-            println!("Warning: Limiting number of layers from {} to {}", num_hidden_layers, applied_layers);
+            println!(
+                "Warning: Limiting number of layers from {} to {}",
+                num_hidden_layers, applied_layers
+            );
         }
-        
+
         // Apply the same layer repeatedly
-        for i in 0..applied_layers {
-            println!("Applying layer {}/{}", i+1, applied_layers);
+        for _ in 0..applied_layers {
             layer_output = self.albert_layer.forward(&layer_output, attention_mask);
         }
         
@@ -221,8 +213,6 @@ impl LoadWeightsBinary for AlbertLayerGroup {
         component_path: &str,
         module_path: &str,
     ) -> Result<(), FerroError> {
-        println!("Loading AlbertLayerGroup for component={}, module={}", component_path, module_path);
-        
         // In ALBERT, we only have a single layer in each group - fail if missing
         self.albert_layer.load_weights_binary(loader, component_path, &format!("{}.albert_layers.0", module_path))?;
         
@@ -281,10 +271,7 @@ impl EmbeddingHiddenMapping {
         // Use the minimum dimension to avoid index out of bounds
         let effective_input_dim = input_dim.min(weight_in_dim);
         let effective_output_dim = weight_out_dim.min(bias_dim);
-        
-        println!("EmbeddingHiddenMapping: input shape={:?}, weight={}x{}, bias={}",
-            shape, weight_out_dim, weight_in_dim, bias_dim);
-        
+
         // Create output data array
         let mut output_data = vec![0.0; batch_size * seq_len * effective_output_dim];
         
@@ -318,27 +305,21 @@ impl EmbeddingHiddenMapping {
         component_path: &str,
         module_path: &str,
     ) -> Result<(), FerroError> {
-        println!("Loading EmbeddingHiddenMapping for component={}, module={}", component_path, module_path);
-        
         // Load weights
         let weight_path = format!(
             "{}.{}.embedding_hidden_mapping_in.weight",
             component_path,
             module_path
         );
-        println!("Loading weight from: {}", weight_path);
         *self.weight.data_mut() = loader.load_tensor(&weight_path)?;
-        println!("Weight loaded with shape: {:?}", self.weight.data().shape());
-        
+
         // Load bias
         let bias_path = format!(
             "{}.{}.embedding_hidden_mapping_in.bias",
             component_path,
             module_path
         );
-        println!("Loading bias from: {}", bias_path);
         *self.bias.data_mut() = loader.load_tensor(&bias_path)?;
-        println!("Bias loaded with shape: {:?}", self.bias.data().shape());
         
         Ok(())
     }
@@ -445,20 +426,15 @@ impl CustomBert {
         token_type_ids: Option<&Tensor<i64>>,
         attention_mask: Option<&Tensor<i64>>,
     ) -> Tensor<f32> {
-        println!("CustomBERT forward: input ids shape={:?}", input_ids.shape());
-        
         // Get embedding layer output
         let embedding_output = self.embeddings.forward(input_ids, token_type_ids);
-        println!("Embedding output shape: {:?}", embedding_output.shape());
-        
+
         // Apply embedding to hidden mapping
         let hidden_states = self.embedding_hidden_mapping.forward(&embedding_output);
-        println!("Hidden states shape: {:?}", hidden_states.shape());
-        
+
         // Apply encoder layers
         let output = self.layer_group.forward(&hidden_states, attention_mask, self.config.num_hidden_layers);
-        println!("Final output shape: {:?}", output.shape());
-        
+
         output
     }
 }
@@ -470,8 +446,6 @@ impl LoadWeightsBinary for CustomBert {
         component_path: &str,
         module_path: &str,
     ) -> Result<(), FerroError> {
-        println!("Loading CustomBERT weights for component={}, module={}", component_path, module_path);
-        
         // Load embeddings - fail immediately if missing
         self.embeddings.load_weights_binary(loader, component_path, module_path)?;
         
@@ -495,20 +469,14 @@ impl LoadWeightsBinary for CustomBert {
             component_path,
             module_path
         );
-        println!("Loading pooler weight from: {}", pooler_weight_path);
         *self.pooler_weight.data_mut() = loader.load_tensor(&pooler_weight_path)?;
-        println!("Pooler weight loaded with shape: {:?}", self.pooler_weight.data().shape());
-        
+
         let pooler_bias_path = format!(
             "{}.{}.pooler.bias",
             component_path,
             module_path
         );
-        println!("Loading pooler bias from: {}", pooler_bias_path);
         *self.pooler_bias.data_mut() = loader.load_tensor(&pooler_bias_path)?;
-        println!("Pooler bias loaded with shape: {:?}", self.pooler_bias.data().shape());
-        
-        println!("CustomBERT weights loaded successfully");
         
         Ok(())
     }

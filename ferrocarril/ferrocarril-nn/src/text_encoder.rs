@@ -398,8 +398,6 @@ impl TextEncoder {
         &mut self, 
         loader: &ferrocarril_core::weights_binary::BinaryWeightLoader
     ) -> Result<(), ferrocarril_core::FerroError> {
-        println!("Loading TextEncoder weights from binary loader...");
-        
         // Component name must be "text_encoder" to match the output structure from the weight converter
         let component = "text_encoder";
         
@@ -413,12 +411,9 @@ impl TextEncoder {
             "STRICT: Embedding weight shape mismatch");
             
         self.embedding.weight = Parameter::new(embedding_weight);
-        println!("✅ Embedding weights loaded: shape {:?}", self.embedding.weight.data().shape());
         
         // STRICT: Load CNN blocks - fail immediately if any missing
         for i in 0..self.cnn.len() {
-            println!("Loading CNN block {}", i);
-            
             // Skip blocks beyond what exists in the weights - but be explicit about this
             if i >= 3 {
                 return Err(ferrocarril_core::FerroError::new(format!(
@@ -464,12 +459,9 @@ impl TextEncoder {
             
             block.ln.gamma = Parameter::new(gamma);
             block.ln.beta = Parameter::new(beta);
-            
-            println!("✅ CNN block {} loaded successfully", i);
         }
         
         // STRICT: Load bidirectional LSTM weights - fail immediately if missing
-        println!("Loading bidirectional LSTM weights...");
         
         // Forward direction weights
         let forward_weight_ih = loader.load_component_parameter(component, "module.lstm.weight_ih_l0")
@@ -501,8 +493,6 @@ impl TextEncoder {
         self.lstm.bias_ih_l0_reverse = Parameter::new(backward_bias_ih);
         self.lstm.bias_hh_l0_reverse = Parameter::new(backward_bias_hh);
         
-        println!("✅ Bidirectional LSTM weights loaded successfully");
-        println!("✅ TextEncoder weights loaded with STRICT validation - no fallbacks!");
         Ok(())
     }
 }

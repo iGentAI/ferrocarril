@@ -213,7 +213,7 @@ impl AdaIN1d {
                     let gamma_val = gamma[&[b, c, 0]];
                     let beta_val = beta[&[b, c, 0]];
 
-                    output_data.push(gamma_val * normalized_val + beta_val);
+                    output_data.push((1.0 + gamma_val) * normalized_val + beta_val);
                 }
             }
         }

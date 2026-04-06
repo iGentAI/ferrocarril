@@ -108,14 +108,7 @@ impl BertEmbeddings {
         let embedding_hidden_size = self.word_embeddings.data().shape()[1];
         let position_hidden_size = self.position_embeddings.data().shape()[1];
         let token_type_hidden_size = self.token_type_embeddings.data().shape()[1];
-        
-        println!("Embedding dimensions: word={:?}, pos={:?}, token_type={:?}, output={:?}",
-            self.word_embeddings.data().shape(),
-            self.position_embeddings.data().shape(),
-            self.token_type_embeddings.data().shape(),
-            self.hidden_size
-        );
-        
+
         // Loop through batch and sequence positions
         for b in 0..batch_size {
             for s in 0..seq_len {
@@ -166,50 +159,40 @@ impl LoadWeightsBinary for BertEmbeddings {
         component_path: &str, 
         module_path: &str,
     ) -> Result<(), FerroError> {
-        println!("Loading BertEmbeddings weights for component={}, module={}", component_path, module_path);
-        
         // Load word embeddings
         let word_embeddings_path = format!(
             "{}.{}.embeddings.word_embeddings.weight",
             component_path,
             module_path
         );
-        println!("Loading word embeddings from: {}", word_embeddings_path);
         let tensor = loader.load_tensor(&word_embeddings_path)?;
         *self.word_embeddings.data_mut() = tensor;
-        println!("Word embeddings loaded with shape: {:?}", self.word_embeddings.data().shape());
-        
+
         // Load position embeddings
         let position_embeddings_path = format!(
-            "{}.{}.embeddings.position_embeddings.weight", 
+            "{}.{}.embeddings.position_embeddings.weight",
             component_path,
             module_path
         );
-        println!("Loading position embeddings from: {}", position_embeddings_path);
         let tensor = loader.load_tensor(&position_embeddings_path)?;
         *self.position_embeddings.data_mut() = tensor;
-        println!("Position embeddings loaded with shape: {:?}", self.position_embeddings.data().shape());
-        
+
         // Load token type embeddings
         let token_type_embeddings_path = format!(
             "{}.{}.embeddings.token_type_embeddings.weight",
             component_path,
             module_path
         );
-        println!("Loading token type embeddings from: {}", token_type_embeddings_path);
         let tensor = loader.load_tensor(&token_type_embeddings_path)?;
         *self.token_type_embeddings.data_mut() = tensor;
-        println!("Token type embeddings loaded with shape: {:?}", self.token_type_embeddings.data().shape());
-        
+
         // Load layer norm
-        println!("Loading layer norm from: {}.{}.embeddings", component_path, module_path);
         self.layer_norm.load_weights_binary(
             loader,
             component_path,
             &format!("{}.embeddings", module_path)
         )?;
-        println!("Layer norm loaded successfully");
-        
+
         Ok(())
     }
 }

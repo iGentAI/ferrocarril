@@ -159,8 +159,6 @@ impl AdaLayerNorm {
         component: &str,
         prefix: &str
     ) -> Result<(), FerroError> {
-        println!("Loading AdaLayerNorm weights for {}.{}", component, prefix);
-        
         // Load Linear parameters
         self.style_fc.load_weights_binary(loader, component, &format!("{}.fc", prefix))?;
         
@@ -183,13 +181,12 @@ impl DurationEncoder {
     pub fn new(style_dim: usize, d_model: usize,
                n_layers: usize, _dropout: f32) -> Self {
         let mut blocks = Vec::new();
-        
-        // We need to make sure we're creating the right number of blocks
-        // Each n_layers in the config creates 2 blocks: LSTM + AdaLayerNorm
-        // The Kokoro model has n_layer=3, so we expect 6 blocks (0-5)
-        println!("Creating DurationEncoder with n_layers={}, which will create {} blocks", n_layers, n_layers * 2);
-        
-        // Restrict the number of layers to prevent trying to load weights that don't exist
+
+        // Each n_layers in the config creates 2 blocks: LSTM + AdaLayerNorm.
+        // The Kokoro model has n_layer=3, so we expect 6 blocks (0-5).
+
+        // Restrict the number of layers to prevent trying to load weights
+        // that don't exist.
         let actual_layers = n_layers.min(3); // Never create more than 3 layers (what's in the weights)
         
         for _layer_idx in 0..actual_layers {
@@ -219,16 +216,11 @@ impl DurationEncoder {
         "STRICT: txt_feat channels {} must equal d_model {}, got shape {:?}", 
         txt_feat.shape()[1], self.d_model, txt_feat.shape());
     
-    println!("DurationEncoder STRICT input validation: txt_feat shape={:?} [B, C, T], style shape={:?} [B, style]", 
-             txt_feat.shape(), style.shape());
-    
     let masks = mask; // [B, T] format
     
     // PyTorch: x = x.permute(2, 0, 1)  # [B,C,T] → [T,B,C]
     let mut x = self.transpose_bct_to_tbc(txt_feat);
     let (t, b, c) = { let s = x.shape(); (s[0], s[1], s[2]) };
-    
-    println!("After permute(2,0,1): shape={:?} [T,B,C]", x.shape());
     
     // STRICT: Validate the transpose worked correctly
     assert_eq!(x.shape(), &[txt_feat.shape()[2], txt_feat.shape()[0], txt_feat.shape()[1]],
@@ -265,8 +257,7 @@ impl DurationEncoder {
     }
     
     x = Tensor::from_data(concat_data, vec![t, b, c + self.style_dim]);
-    println!("After torch.cat([x, s], axis=-1): shape={:?} [T,B,C+style]", x.shape());
-    
+
     // STRICT: Validate concatenation worked correctly
     assert_eq!(x.shape(), &[t, b, c + self.style_dim],
         "STRICT: Style concatenation failed");
@@ -282,7 +273,6 @@ impl DurationEncoder {
     
     // PyTorch: x = x.transpose(0, 1)  # [T,B,C+style] → [B,T,C+style]
     x = self.transpose_tbc_to_btc(&x);
-    println!("After transpose(0, 1): shape={:?} [B,T,C+style]", x.shape());
 
     // STRICT: Validate transpose back to batch-first
     assert_eq!(x.shape(), &[b, t, c + self.style_dim],
@@ -337,8 +327,6 @@ impl DurationEncoder {
                     "STRICT: LSTM {} should output d_model={} channels, got {}. Shape: {:?}",
                     block_idx, self.d_model, x.shape()[1], x.shape());
 
-                println!("LSTM {} output shape: {:?} - style channels correctly dropped to d_model", block_idx, x.shape());
-
                 // Pad if needed
                 let x_padded = self.pad_tensor_if_needed(&x, masks.shape()[1]);
                 x = x_padded;
@@ -348,9 +336,7 @@ impl DurationEncoder {
                 let x_btc = self.transpose_bct_to_btc(&x); // [B,C,T] → [B,T,C]
                 let ada_out = adaln.forward(&x_btc, style);  
                 x = self.transpose_btc_to_bct(&ada_out); // [B,T,C] → [B,C,T]
-                
-                println!("AdaLayerNorm {} output shape: {:?}", block_idx, x.shape());
-                
+
                 // PyTorch: x = torch.cat([x, s.permute(1, 2, 0)], axis=1)
                 let mut style_bct = vec![0.0; b * self.style_dim * x.shape()[2]];
                 let t_current = x.shape()[2];
@@ -405,10 +391,6 @@ impl DurationEncoder {
         final_output.shape()
     );
 
-    println!(
-        "DurationEncoder final output VALIDATED: {:?} [B,T,d_model+style] (matches Python reference)",
-        final_output.shape()
-    );
     final_output
 }
 
@@ -639,68 +621,50 @@ impl DurationEncoder {
         component: &str,
         prefix: &str
     ) -> Result<(), FerroError> {
-        println!("Loading DurationEncoder weights for {}.{}", component, prefix);
-        
-        // Log how many blocks we're trying to load
-        let total_blocks = self.blocks.len();
-        println!("DurationEncoder has {} blocks to load", total_blocks);
-        
-        // Loop through blocks and load weights for each
+        // Loop through blocks and load weights for each. Block layout matches
+        // Python's `predictor.text_encoder.lstms`:
+        //   [LSTM, AdaLayerNorm, LSTM, AdaLayerNorm, LSTM, AdaLayerNorm]
+        // so block index `i` maps directly to `lstms.{i}`. For LSTM blocks the
+        // call must load BOTH the forward and reverse directions; this is
+        // exactly what the `LoadWeightsBinary` trait impl on `LSTM` does, so
+        // we delegate to it instead of hand-rolling the per-direction load.
         for (i, blk) in self.blocks.iter_mut().enumerate() {
-            // Skip loading blocks beyond what the model actually has
-            // Kokoro model has 3 LSTM pairs (6 blocks total, indices 0-5)
-            if i >= 6 {
-                println!("Skipping block {} as it exceeds the available weights in Kokoro model", i);
-                continue;
-            }
-            
+            assert!(
+                i < 6,
+                "STRICT: DurationEncoder has more blocks ({}) than the Kokoro \
+                 weights provide (6 entries in predictor.text_encoder.lstms)",
+                self.blocks.len()
+            );
+
+            let block_prefix = format!("{}.lstms.{}", prefix, i);
+
             match blk {
                 Block::Rnn(lstm) => {
-                    // In Kokoro, the LSTM blocks are stored in the module.text_encoder.lstms array
-                    let lstm_idx = i / 2 * 2; // Convert block index to lstm index (0,1,2,3,4,5 -> 0,0,2,2,4,4)
-                    let lstm_prefix = format!("{}.lstms.{}", prefix, lstm_idx);
-                    
-                    println!("Loading LSTM weights for block {} from {}.lstms.{}", i, prefix, lstm_idx);
-                    
-                    // Try to load LSTM weights, but don't fail if not found
-                    if let Err(e) = lstm.load_weights_binary_with_reverse(
-                        loader, 
-                        component, 
-                        &lstm_prefix,
-                        i % 2 == 1 // odd indices are reverse
-                    ) {
-                        println!("Warning: Could not load LSTM weights for block {}. Error: {}", i, e);
-                        println!("Using default random weights instead.");
-                        // Continue with default random weights
-                    } else {
-                        println!("Successfully loaded LSTM weights for block {}", i);
-                    }
-                },
+                    // Trait method loads weight_ih_l0, weight_hh_l0, bias_ih_l0,
+                    // bias_hh_l0 AND the *_reverse variants when bidirectional=true.
+                    lstm.load_weights_binary(loader, component, &block_prefix)
+                        .map_err(|e| {
+                            FerroError::new(format!(
+                                "STRICT: Failed to load DurationEncoder LSTM block {} \
+                                 from {}.{}: {}",
+                                i, component, block_prefix, e
+                            ))
+                        })?;
+                }
                 Block::Ada(adaln) => {
-                    // In Kokoro, the FC layers are stored in the module.text_encoder.lstms array
-                    // after each LSTM pair
-                    let fc_idx = i / 2 * 2 + 1; // Convert block index to fc index (0,1,2,3,4,5 -> 1,1,3,3,5,5)
-                    let fc_prefix = format!("{}.lstms.{}", prefix, fc_idx);
-                    
-                    println!("Loading AdaLayerNorm weights for block {} from {}.lstms.{}", i, prefix, fc_idx);
-                    
-                    // Try to load AdaLayerNorm weights, but don't fail if not found
-                    if let Err(e) = adaln.load_weights_binary(
-                        loader, 
-                        component, 
-                        &fc_prefix
-                    ) {
-                        println!("Warning: Could not load AdaLayerNorm weights for block {}. Error: {}", i, e);
-                        println!("Using default random weights instead.");
-                        // Continue with default random weights
-                    } else {
-                        println!("Successfully loaded AdaLayerNorm weights for block {}", i);
-                    }
-                },
+                    adaln
+                        .load_weights_binary(loader, component, &block_prefix)
+                        .map_err(|e| {
+                            FerroError::new(format!(
+                                "STRICT: Failed to load DurationEncoder AdaLayerNorm \
+                                 block {} from {}.{}: {}",
+                                i, component, block_prefix, e
+                            ))
+                        })?;
+                }
             }
         }
-        
-        // Always return success - we've handled errors at the component level
+
         Ok(())
     }
 }

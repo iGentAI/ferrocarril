@@ -246,7 +246,7 @@ impl Generator {
             3,                   // padding
             1,                   // dilation
             1,                   // groups
-            false,               // bias
+            true,                // bias
         );
         
         // Create STFT
@@ -280,25 +280,20 @@ impl Generator {
 
         // First, verify the input shape - should be [B, T]
         let (batch, time) = (f0.shape()[0], f0.shape()[1]);
-        println!("Input F0 shape: [{}, {}]", batch, time);
-        
+
         // Calculate the scale factor
         let hop_scale = self.upsample_scales_prod * self.gen_istft_hop_size;
         let new_time = time * hop_scale;
-        println!("Upsampling F0 by factor {}, new length: {}", hop_scale, new_time);
-        
+
         // Create the upsampled tensor by repeating each value hop_scale times
         let mut result = vec![0.0; batch * new_time];
-        
+
         for b in 0..batch {
             for t in 0..time {
                 for i in 0..hop_scale {
                     let idx = b * new_time + t * hop_scale + i;
                     if idx < result.len() {
                         result[idx] = f0.data()[b * time + t];
-                    } else {
-                        println!("Warning: Index out of bounds in F0 upsampling: {} >= {}", 
-                                 idx, result.len());
                     }
                 }
             }
@@ -320,6 +315,165 @@ impl Generator {
         Tensor::from_data(result_3d, vec![batch, 1, new_time])
     }
     
+    /// Run the Generator forward up to and including `conv_post`, but
+    /// stop before the `spec = exp(x[:n])`, `phase = sin(x[n:])` split
+    /// and the iSTFT inverse. Returns the raw conv_post output of shape
+    /// `[B, gen_istft_n_fft + 2, T]`. Used by integration tests to
+    /// bisect Generator numerical drift against the
+    /// `decoder_generator_conv_post.npy` kmodel fixture.
+    pub fn forward_to_conv_post(
+        &self,
+        x: &Tensor<f32>,
+        s: &Tensor<f32>,
+        f0: &Tensor<f32>,
+    ) -> Result<Tensor<f32>, FerroError> {
+        assert_eq!(x.shape().len(), 3, "forward_to_conv_post: x must be [B, C, T]");
+        assert_eq!(s.shape().len(), 2, "forward_to_conv_post: s must be [B, S]");
+        assert_eq!(f0.shape().len(), 2, "forward_to_conv_post: f0 must be [B, T]");
+
+        let f0_upsampled_bct = self.upsample_f0(f0);
+        let f0_upsampled = {
+            let shape = f0_upsampled_bct.shape();
+            let (b, _c, t_up) = (shape[0], shape[1], shape[2]);
+            let mut transposed = vec![0.0f32; b * t_up];
+            for batch in 0..b {
+                for t in 0..t_up {
+                    transposed[batch * t_up + t] = f0_upsampled_bct[&[batch, 0, t]];
+                }
+            }
+            Tensor::from_data(transposed, vec![b, t_up, 1])
+        };
+
+        let (har_source, _noise_source, _uv) = self.source.forward(&f0_upsampled);
+        let har_source_for_stft = if har_source.shape().len() == 3 {
+            let (b, _c, t) = (har_source.shape()[0], har_source.shape()[1], har_source.shape()[2]);
+            let mut data = vec![0.0f32; b * t];
+            for batch in 0..b {
+                for time in 0..t {
+                    data[batch * t + time] = har_source[&[batch, 0, time]];
+                }
+            }
+            Tensor::from_data(data, vec![b, t])
+        } else {
+            har_source.clone()
+        };
+
+        if har_source_for_stft.shape()[1] < self.gen_istft_n_fft {
+            return Err(FerroError::new(format!(
+                "forward_to_conv_post: har_source too short for STFT ({} < {})",
+                har_source_for_stft.shape()[1],
+                self.gen_istft_n_fft
+            )));
+        }
+
+        let (har_spec, har_phase) = self.stft.transform(&har_source_for_stft);
+        let (batch, freq_bins, frames) = (
+            har_spec.shape()[0],
+            har_spec.shape()[1],
+            har_spec.shape()[2],
+        );
+        let mut har_data = vec![0.0f32; batch * (freq_bins * 2) * frames];
+        for b in 0..batch {
+            for f in 0..freq_bins {
+                for t in 0..frames {
+                    har_data[b * (freq_bins * 2) * frames + f * frames + t] = har_spec[&[b, f, t]];
+                }
+            }
+        }
+        for b in 0..batch {
+            for f in 0..freq_bins {
+                for t in 0..frames {
+                    har_data[b * (freq_bins * 2) * frames + (f + freq_bins) * frames + t] =
+                        har_phase[&[b, f, t]];
+                }
+            }
+        }
+        let har = Tensor::from_data(har_data, vec![batch, freq_bins * 2, frames]);
+
+        let mut hidden = x.clone();
+        for i in 0..self.ups.len() {
+            let mut hidden_data = hidden.data().to_vec();
+            for j in 0..hidden_data.len() {
+                hidden_data[j] = if hidden_data[j] > 0.0 {
+                    hidden_data[j]
+                } else {
+                    0.1 * hidden_data[j]
+                };
+            }
+            hidden = Tensor::from_data(hidden_data, hidden.shape().to_vec());
+
+            let x_source = self.noise_convs[i].forward(&har);
+            let x_source = self.noise_res[i].forward(&x_source, s);
+
+            hidden = self.ups[i].forward(&hidden);
+
+            if i == self.ups.len() - 1 {
+                let shape = hidden.shape().to_vec();
+                let (b, c, t) = (shape[0], shape[1], shape[2]);
+                let new_t = t + 1;
+                let mut padded = vec![0.0f32; b * c * new_t];
+                for bb in 0..b {
+                    for cc in 0..c {
+                        padded[bb * c * new_t + cc * new_t] = hidden[&[bb, cc, 1]];
+                        for tt in 0..t {
+                            padded[bb * c * new_t + cc * new_t + (tt + 1)] = hidden[&[bb, cc, tt]];
+                        }
+                    }
+                }
+                hidden = Tensor::from_data(padded, vec![b, c, new_t]);
+            }
+
+            if hidden.shape() == x_source.shape() {
+                let mut combined_data = hidden.data().to_vec();
+                for j in 0..combined_data.len() {
+                    combined_data[j] += x_source.data()[j];
+                }
+                hidden = Tensor::from_data(combined_data, hidden.shape().to_vec());
+            } else {
+                return Err(FerroError::new(format!(
+                    "forward_to_conv_post: hidden {:?} vs x_source {:?} shape mismatch",
+                    hidden.shape(),
+                    x_source.shape()
+                )));
+            }
+
+            let mut xs: Option<Tensor<f32>> = None;
+            for j in 0..self.num_kernels {
+                let block_idx = i * self.num_kernels + j;
+                let xj = self.resblocks[block_idx].forward(&hidden, s);
+                if let Some(ref mut xs_val) = xs {
+                    let mut xs_data = xs_val.data().to_vec();
+                    let xj_data = xj.data();
+                    for k in 0..xs_data.len() {
+                        xs_data[k] += xj_data[k];
+                    }
+                    *xs_val = Tensor::from_data(xs_data, xs_val.shape().to_vec());
+                } else {
+                    xs = Some(xj);
+                }
+            }
+            if let Some(xs_val) = xs {
+                let mut xs_data = xs_val.data().to_vec();
+                for j in 0..xs_data.len() {
+                    xs_data[j] /= self.num_kernels as f32;
+                }
+                hidden = Tensor::from_data(xs_data, xs_val.shape().to_vec());
+            }
+        }
+
+        let mut hidden_data = hidden.data().to_vec();
+        for i in 0..hidden_data.len() {
+            hidden_data[i] = if hidden_data[i] > 0.0 {
+                hidden_data[i]
+            } else {
+                0.01 * hidden_data[i]
+            };
+        }
+        hidden = Tensor::from_data(hidden_data, hidden.shape().to_vec());
+
+        Ok(self.conv_post.forward(&hidden))
+    }
+
     pub fn forward(&self, x: &Tensor<f32>, s: &Tensor<f32>, f0: &Tensor<f32>) -> Result<Tensor<f32>, FerroError> {
         // Verify input shapes
         if x.shape().len() != 3 {
@@ -348,14 +502,8 @@ impl Generator {
                   f0.shape()[0], batch_size);
         }
         
-        // Log input shapes for debugging
-        println!("Generator input shapes - x: {:?}, s: {:?}, f0: {:?}", 
-                 x.shape(), s.shape(), f0.shape());
-        
         // Upsample F0 for source module
-        println!("Input F0 shape: {:?}", f0.shape());
         let f0_upsampled_bct = self.upsample_f0(f0);
-        println!("Upsampled F0 shape (BCT): {:?}", f0_upsampled_bct.shape());
 
         // Transpose from [B, 1, T_up] to [B, T_up, 1] for SineGen
         let f0_upsampled = {
@@ -373,12 +521,9 @@ impl Generator {
             }
             Tensor::from_data(transposed, vec![b, t_up, 1])
         };
-        println!("Upsampled F0 shape (BTD): {:?}", f0_upsampled.shape());
-
         // Generate source signals
         let (har_source, _noise_source, _uv) = self.source.forward(&f0_upsampled);
-        println!("Harmonic source shape: {:?}", har_source.shape());
-        
+
         // Ensure harmonic source has the right shape for STFT
         let har_source_for_stft = if har_source.shape().len() == 3 {
             // Convert [B, C, T] to [B, T] by taking only the first channel
@@ -411,9 +556,7 @@ impl Generator {
         
         // Apply STFT to get harmonic spectrogram
         let (har_spec, har_phase) = self.stft.transform(&har_source_for_stft);
-        println!("STFT output shapes - spec: {:?}, phase: {:?}", 
-                 har_spec.shape(), har_phase.shape());
-        
+
         // Verify STFT output shapes match
         if har_spec.shape() != har_phase.shape() {
             panic!("STFT output shape mismatch: spec {:?}, phase {:?}",
@@ -444,8 +587,7 @@ impl Generator {
         }
         
         let har = Tensor::from_data(har_data, vec![batch, freq_bins * 2, frames]);
-        println!("Combined har tensor shape: {:?}", har.shape());
-        
+
         // Upsampling network - process the input through ups layers
         let mut hidden = x.clone();
         
@@ -560,7 +702,7 @@ impl Generator {
             hidden_data[i] = if hidden_data[i] > 0.0 {
                 hidden_data[i]
             } else {
-                0.1 * hidden_data[i]
+                0.01 * hidden_data[i]
             };
         }
         hidden = Tensor::from_data(hidden_data, hidden.shape().to_vec());
@@ -611,12 +753,12 @@ impl Generator {
 
 /// Decoder for generating audio from asr, f0, and noise inputs
 pub struct Decoder {
-    encode: Arc<AdainResBlk1d>,
-    decode: Vec<Arc<AdainResBlk1d>>,
-    f0_conv: Conv1d,
-    n_conv: Conv1d,
-    asr_res: Conv1d,
-    generator: Generator,
+    pub encode: Arc<AdainResBlk1d>,
+    pub decode: Vec<Arc<AdainResBlk1d>>,
+    pub f0_conv: Conv1d,
+    pub n_conv: Conv1d,
+    pub asr_res: Conv1d,
+    pub generator: Generator,
 }
 
 impl Decoder {
@@ -743,11 +885,6 @@ impl Decoder {
             f0_curve.shape()
         );
 
-        println!(
-            "Decoder input shapes - asr: {:?}, f0: {:?}, noise: {:?}, style: {:?}",
-            asr.shape(), f0_curve.shape(), n.shape(), s.shape()
-        );
-
         let mut f0_flat = vec![0.0f32; batch * t_curve];
         let mut n_flat = vec![0.0f32; batch * t_curve];
         for b in 0..batch {
@@ -761,10 +898,6 @@ impl Decoder {
 
         let f0 = self.f0_conv.forward(&f0_bct);
         let nn_ = self.n_conv.forward(&n_bct);
-        println!(
-            "Decoder downsampled shapes - f0: {:?}, n: {:?}",
-            f0.shape(), nn_.shape()
-        );
 
         assert_eq!(
             f0.shape(),
@@ -794,9 +927,7 @@ impl Decoder {
             if res {
                 x = self.concat_channels(&[&x, &asr_res, &f0, &nn_]);
             }
-            println!("Decoder block {} input shape: {:?}", i, x.shape());
             x = block.forward(&x, s);
-            println!("Decoder block {} output shape: {:?}", i, x.shape());
             if block.is_upsample() {
                 res = false;
             }

@@ -6,11 +6,11 @@
 //! PyTorch reimplementation of Kokoro's TextEncoder loaded with the real
 //! Kokoro-82M `text_encoder` sub-state-dict.
 //!
-//! The test is `#[ignore]`d by default because the Phase 3 numerical
-//! correctness pass is in flight and the Rust TextEncoder is not yet
-//! validated. Run explicitly:
+//! The test runs by default (no `#[ignore]`) as a regression gate and
+//! currently passes at ~1e-6 actual drift against the Python reference.
+//! Run it explicitly with:
 //!
-//!     cargo test --release --test text_encoder_golden_test -- --ignored --nocapture
+//!     cargo test --release --test text_encoder_golden_test --features weights -- --nocapture
 //!
 //! Expected Python reference output (from Kokoro v1.0 weights, 7-token
 //! input `[0, 50, 86, 54, 59, 135, 0]`, BCT layout `[1, 512, 7]`):
@@ -27,7 +27,7 @@ use std::error::Error;
 use std::path::Path;
 
 use ferrocarril_core::weights_binary::BinaryWeightLoader;
-use ferrocarril_core::{tensor::Tensor, LoadWeightsBinary};
+use ferrocarril_core::tensor::Tensor;
 use ferrocarril_nn::text_encoder::TextEncoder;
 
 /// Python reference values from the faithful PyTorch reimplementation of
@@ -44,7 +44,7 @@ const PY_LAST_CHANNEL: [f32; 7] = [
 
 const PY_MEAN_ABS: f32 = 0.219714;
 
-const DRIFT_TOLERANCE: f32 = 1e-4;
+const DRIFT_TOLERANCE: f32 = 1e-5;
 
 fn find_weights_path() -> Option<String> {
     for candidate in [
@@ -60,7 +60,6 @@ fn find_weights_path() -> Option<String> {
 }
 
 #[test]
-#[ignore = "Phase 3 numerical validation: enable with --ignored until Rust TextEncoder matches Python"]
 fn test_text_encoder_golden_vs_python_reference() -> Result<(), Box<dyn Error>> {
     let weights_path = find_weights_path().ok_or_else(|| {
         "ferrocarril_weights not found; run `python3 weight_converter.py \

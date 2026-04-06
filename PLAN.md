@@ -1,5 +1,21 @@
 # Ferrocarril Review and Plan — April 2026
 
+> **Phase 3 numerical correctness is COMPLETE** (end of session, April 2026).
+> The Rust Kokoro-82M port now matches the Python reference to f32 precision
+> across every transformer component (BERT / TextEncoder / DurationEncoder /
+> ProsodyPredictor / Decoder) and within ~1 % global RMS + 0.99 envelope
+> correlation on the final generator audio. `cargo test --release --features
+> weights` runs clean at 22 passed / 0 failed / 0 ignored. The `ferrocarril
+> infer` CLI produces intelligible 24 kHz audio from real text via G2P. For
+> the tactical summary of what shipped, the test matrix, the sandbox setup
+> and the suggested Phase 4 (cleanup) and Phase 5 (WASM) next steps, read
+> **`HANDOFF.md`** — it is the authoritative "what's done and what's next"
+> document. The rest of this file is retained as historical context
+> (especially §3 "Is Kokoro Still the Right Target?" and the phased
+> roadmap).
+
+---
+
 > **Goal:** A pure-Rust, zero-GPU, WebAssembly-cross-compilable text-to-speech
 > system. Originally conceived as a from-scratch port of the Kokoro-82M model
 > built on StyleTTS2 + iSTFTNet, using Phonesis (in-tree) for grapheme-to-phoneme.

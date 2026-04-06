@@ -20,9 +20,10 @@
 //!                              0.46138, -0.25172, 2.27205, -1.16052]
 //!   mean |x|: 0.440264
 //!
-//! The test is `#[ignore]`d until the Rust DurationEncoder matches Python
-//! within tolerance. Run explicitly with
-//! `cargo test --release --test duration_encoder_golden_test -- --ignored --nocapture`.
+//! The test runs by default (no `#[ignore]`) as a regression gate and
+//! currently passes at ~6e-6 actual drift. Run it explicitly with:
+//!
+//!     cargo test --release --test duration_encoder_golden_test --features weights -- --nocapture
 
 #![cfg(feature = "weights")]
 
@@ -50,7 +51,7 @@ const PY_LAST_TIME_FIRST_8: [f32; 8] = [
 
 const PY_MEAN_ABS: f32 = 0.440264;
 
-const DRIFT_TOLERANCE: f32 = 1e-3;
+const DRIFT_TOLERANCE: f32 = 1e-4;
 
 fn find_weights_path() -> Option<String> {
     for candidate in [
@@ -87,7 +88,6 @@ fn load_voice_pack(weights_path: &str) -> Result<Tensor<f32>, Box<dyn Error>> {
 }
 
 #[test]
-#[ignore = "Phase 3 numerical validation: enable with --ignored until DurationEncoder matches Python"]
 fn test_duration_encoder_golden_vs_python_reference() -> Result<(), Box<dyn Error>> {
     let weights_path = find_weights_path().ok_or_else(|| {
         "ferrocarril_weights not found; run `python3 weight_converter.py \
