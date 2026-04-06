@@ -152,8 +152,8 @@ impl Config {
         let mut vocab = std::collections::HashMap::new();
         if let Some(vocab_obj) = config["vocab"].as_object() {
             for (key, value) in vocab_obj {
-                if key.len() == 1 {
-                    let ch = key.chars().next().unwrap();
+                let mut chars = key.chars();
+                if let (Some(ch), None) = (chars.next(), chars.next()) {
                     let id = value.as_u64().unwrap_or(0) as usize;
                     vocab.insert(ch, id);
                 }
@@ -248,7 +248,7 @@ impl PhonesisG2P {
             "en" | "en-us" | "en-gb" => {
                 let options = G2POptions {
                     handle_stress: true,
-                    default_standard: PhonemeStandard::ARPABET,
+                    default_standard: PhonemeStandard::IPA,
                     fallback_strategy: FallbackStrategy::UseRules,
                 };
                 
@@ -258,7 +258,7 @@ impl PhonesisG2P {
                 Ok(Self {
                     inner: Arc::new(Mutex::new(g2p)),
                     language: language.to_string(),
-                    standard: PhonemeStandard::ARPABET,
+                    standard: PhonemeStandard::IPA,
                 })
             },
             _ => Err(FerroError::new(format!("Unsupported language: {}", language))),

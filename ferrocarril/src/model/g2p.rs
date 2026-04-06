@@ -122,9 +122,17 @@ mod tests {
         assert!(result.success, "Basic conversion should succeed");
         assert!(!result.phonemes.is_empty(), "Should produce non-empty phonemes");
         
-        // Should contain HH for 'hello'
-        assert!(result.phonemes.contains("HH"), "Should contain HH phoneme for 'hello'");
-        
+        assert!(
+            result.phonemes.contains("ɛ"),
+            "Should contain 'ɛ' phoneme for 'hello' (got: {})",
+            result.phonemes
+        );
+        assert!(
+            result.phonemes.contains('l'),
+            "Should contain 'l' phoneme for 'hello'/'world' (got: {})",
+            result.phonemes
+        );
+
         println!("Original: \"{}\"", result.original_text);
         println!("Phonemes: {}", result.phonemes);
         

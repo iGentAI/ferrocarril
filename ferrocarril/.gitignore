@@ -9,6 +9,24 @@ target/
 # MSVC Windows builds of rustc generate these, which store debugging information
 *.pdb
 
+# Converted Kokoro model weights and voices (~341MB).
+# Reproduced on demand by `python3 weight_converter.py
+# --huggingface hexgrad/Kokoro-82M --output ferrocarril_weights` and must not
+# be checked in or synced through the filestore — they will overwhelm
+# mutagen and reset the sandbox.
+ferrocarril_weights/
+real_kokoro_weights/
+**/ferrocarril_weights/
+**/real_kokoro_weights/
+
+# Demo / test audio outputs
+*.wav
+demo_audio.wav
+test_output/
+
+# Local copy of model config used by the main binary
+/config.json
+
 # RustRover
 #  JetBrains specific template is maintained in a separate JetBrains.gitignore that can
 #  be found at https://github.com/github/gitignore/blob/main/Global/JetBrains.gitignore

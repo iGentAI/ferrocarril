@@ -185,14 +185,38 @@ impl AdaINResBlock1 {
             // Process through AdaIN and Snake1D (matching Kokoro exactly)
             let mut xt = self.adain1[i].forward(&result, s);
             
-            // Apply Snake1D activation
+            // Apply Snake1D activation per channel.
+            // The alpha parameter may be 1D [channels] or 3D [1, channels, 1],
+            // so we read the underlying flat buffer directly.
+            let xt_shape = xt.shape().to_vec();
+            assert_eq!(
+                xt_shape.len(),
+                3,
+                "AdaINResBlock1: Snake1D input must be 3D [B, C, T], got {:?}",
+                xt_shape
+            );
+            let (b_n, c_n, t_n) = (xt_shape[0], xt_shape[1], xt_shape[2]);
+            let alpha1 = self.alpha1[i].data().data();
+            assert_eq!(
+                alpha1.len(),
+                c_n,
+                "AdaINResBlock1: alpha1[{}] has {} elements, expected {} (channels)",
+                i,
+                alpha1.len(),
+                c_n
+            );
             let mut xt_data = xt.data().to_vec();
-            for j in 0..xt_data.len() {
-                // For simplicity, use the same alpha for all channels in this block
-                let alpha = self.alpha1[i].data()[&[0]];
-                xt_data[j] = snake1d(xt_data[j], alpha);
+            for bb in 0..b_n {
+                for cc in 0..c_n {
+                    let a = alpha1[cc];
+                    for tt in 0..t_n {
+                        let idx = bb * c_n * t_n + cc * t_n + tt;
+                        let v = xt_data[idx];
+                        xt_data[idx] = snake1d(v, a);
+                    }
+                }
             }
-            xt = Tensor::from_data(xt_data, xt.shape().to_vec());
+            xt = Tensor::from_data(xt_data, xt_shape.clone());
             
             // Apply upsampling if this is the first iteration and we have upsampling
             // This matches Kokoro: if i==0 and self.upsample is not None: xt = self.upsample(xt)
@@ -212,14 +236,36 @@ impl AdaINResBlock1 {
             // Second AdaIN (matches Kokoro: xt = n2(xt, s))
             xt = self.adain2[i].forward(&xt, s);
             
-            // Apply second Snake1D activation (matches Kokoro)
+            // Apply second Snake1D activation per channel.
+            let xt2_shape = xt.shape().to_vec();
+            assert_eq!(
+                xt2_shape.len(),
+                3,
+                "AdaINResBlock1: Snake1D input must be 3D [B, C, T], got {:?}",
+                xt2_shape
+            );
+            let (b_n, c_n, t_n) = (xt2_shape[0], xt2_shape[1], xt2_shape[2]);
+            let alpha2 = self.alpha2[i].data().data();
+            assert_eq!(
+                alpha2.len(),
+                c_n,
+                "AdaINResBlock1: alpha2[{}] has {} elements, expected {} (channels)",
+                i,
+                alpha2.len(),
+                c_n
+            );
             let mut xt_data = xt.data().to_vec();
-            for j in 0..xt_data.len() {
-                // For simplicity, use the same alpha for all channels in this block
-                let alpha = self.alpha2[i].data()[&[0]];
-                xt_data[j] = snake1d(xt_data[j], alpha);
+            for bb in 0..b_n {
+                for cc in 0..c_n {
+                    let a = alpha2[cc];
+                    for tt in 0..t_n {
+                        let idx = bb * c_n * t_n + cc * t_n + tt;
+                        let v = xt_data[idx];
+                        xt_data[idx] = snake1d(v, a);
+                    }
+                }
             }
-            xt = Tensor::from_data(xt_data, xt.shape().to_vec());
+            xt = Tensor::from_data(xt_data, xt2_shape);
             
             // Second convolution (matches Kokoro: xt = c2(xt))
             xt = self.convs2[i].forward(&xt);

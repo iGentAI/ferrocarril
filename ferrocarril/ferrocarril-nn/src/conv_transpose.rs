@@ -2,12 +2,11 @@
 
 use crate::{Parameter, Forward};
 use ferrocarril_core::tensor::Tensor;
+use ferrocarril_core::FerroError;
 #[cfg(feature = "weights")]
 use ferrocarril_core::weights_binary::BinaryWeightLoader;
 #[cfg(feature = "weights")]
 use ferrocarril_core::LoadWeightsBinary;
-#[cfg(feature = "weights")]
-use ferrocarril_core::FerroError;
 
 /// A 1D transposed convolution layer for upsampling
 #[derive(Debug)]
@@ -72,6 +71,85 @@ impl ConvTranspose1d {
             out_channels: out_channels_adjusted,
             kernel_size,
         }
+    }
+
+    pub fn set_weight_norm(
+        &mut self,
+        weight_g: &Tensor<f32>,
+        weight_v: &Tensor<f32>,
+    ) -> Result<(), FerroError> {
+        // ConvTranspose1d weight shape is [in_channels, out_channels/groups, kernel_size].
+        // PyTorch `weight_norm(..., dim=0)` L2-normalizes over dims (1, 2).
+        let v_shape = weight_v.shape().to_vec();
+        if v_shape.is_empty() {
+            return Err(FerroError::new(
+                "ConvTranspose1d::set_weight_norm: weight_v has zero dims",
+            ));
+        }
+        let in_c = v_shape[0];
+        if in_c == 0 {
+            return Err(FerroError::new(
+                "ConvTranspose1d::set_weight_norm: weight_v dim 0 is zero",
+            ));
+        }
+        let rest: usize = v_shape.iter().skip(1).product();
+        if rest == 0 {
+            return Err(FerroError::new(format!(
+                "ConvTranspose1d::set_weight_norm: inner dims product to zero ({:?})",
+                v_shape
+            )));
+        }
+
+        let g_data = weight_g.data();
+        if g_data.len() != in_c {
+            return Err(FerroError::new(format!(
+                "ConvTranspose1d::set_weight_norm: weight_g has {} elements, expected {} (in_channels)",
+                g_data.len(),
+                in_c
+            )));
+        }
+
+        let v_data = weight_v.data();
+        if v_data.len() != in_c * rest {
+            return Err(FerroError::new(format!(
+                "ConvTranspose1d::set_weight_norm: weight_v length {} != product of shape {:?}",
+                v_data.len(),
+                v_shape
+            )));
+        }
+
+        let mut result = Vec::with_capacity(v_data.len());
+        for ic in 0..in_c {
+            let start = ic * rest;
+            let end = start + rest;
+            let slice = &v_data[start..end];
+            let norm_sq: f32 = slice.iter().map(|&x| x * x).sum();
+            let norm = norm_sq.sqrt().max(1e-12);
+            let scale = g_data[ic] / norm;
+            for &v in slice {
+                result.push(v * scale);
+            }
+        }
+        self.weight = Parameter::new(Tensor::from_data(result, v_shape));
+        Ok(())
+    }
+
+    pub fn set_bias(&mut self, bias: &Tensor<f32>) -> Result<(), FerroError> {
+        if bias.shape().len() != 1 {
+            return Err(FerroError::new(format!(
+                "ConvTranspose1d::set_bias: bias must be 1D, got shape {:?}",
+                bias.shape()
+            )));
+        }
+        if bias.shape()[0] != self.out_channels {
+            return Err(FerroError::new(format!(
+                "ConvTranspose1d::set_bias: bias length {} != out_channels {}",
+                bias.shape()[0],
+                self.out_channels
+            )));
+        }
+        self.bias = Some(Parameter::new(bias.clone()));
+        Ok(())
     }
     
     /// Perform transposed 1D convolution (deconvolution)
@@ -211,20 +289,54 @@ impl LoadWeightsBinary for ConvTranspose1d {
         &mut self,
         loader: &BinaryWeightLoader,
         component: &str,
-        prefix: &str
+        prefix: &str,
     ) -> Result<(), FerroError> {
-        // Load weight
-        if let Ok(weight) = loader.load_component_parameter(component, &format!("{}.weight", prefix)) {
-            self.weight = Parameter::new(weight);
+        let dot_g = format!("{}.weight_g", prefix);
+        let dot_v = format!("{}.weight_v", prefix);
+        let plain_w = format!("{}.weight", prefix);
+        let dot_b = format!("{}.bias", prefix);
+
+        let mut weight_loaded = false;
+        if let (Ok(g), Ok(v)) = (
+            loader.load_component_parameter(component, &dot_g),
+            loader.load_component_parameter(component, &dot_v),
+        ) {
+            self.set_weight_norm(&g, &v)?;
+            weight_loaded = true;
         }
-        
-        // Load bias if it exists
-        if let Some(ref mut bias) = self.bias {
-            if let Ok(bias_tensor) = loader.load_component_parameter(component, &format!("{}.bias", prefix)) {
-                *bias = Parameter::new(bias_tensor);
+
+        if !weight_loaded {
+            match loader.load_component_parameter(component, &plain_w) {
+                Ok(w) => {
+                    self.weight = Parameter::new(w);
+                    weight_loaded = true;
+                }
+                Err(e) => {
+                    return Err(FerroError::new(format!(
+                        "ConvTranspose1d::load_weights_binary: no weight_norm and no plain .weight for '{}.{}': {}",
+                        component, prefix, e
+                    )));
+                }
             }
         }
-        
+        debug_assert!(weight_loaded);
+
+        if let Ok(b) = loader.load_component_parameter(component, &dot_b) {
+            // Accept biases shipped with extra singleton dims.
+            let flat = b.data().to_vec();
+            if flat.len() == self.out_channels {
+                self.bias = Some(Parameter::new(Tensor::from_data(
+                    flat,
+                    vec![self.out_channels],
+                )));
+            } else {
+                return Err(FerroError::new(format!(
+                    "ConvTranspose1d::load_weights_binary: bias '{}.{}' has {} elements, expected {}",
+                    component, dot_b, flat.len(), self.out_channels
+                )));
+            }
+        }
+
         Ok(())
     }
 }

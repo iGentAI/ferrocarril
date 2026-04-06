@@ -1,0 +1,156 @@
+{
+  "repo_id": "hexgrad/Kokoro-82M",
+  "pth_file": "kokoro-v1_0.pth",
+  "voice_name": "af_heart",
+  "input_ids": [
+    [
+      0,
+      50,
+      86,
+      54,
+      59,
+      135,
+      0
+    ]
+  ],
+  "num_phonemes": 5,
+  "voice_row": 4,
+  "audio_samples": 33600,
+  "pred_dur": [
+    18,
+    2,
+    2,
+    3,
+    4,
+    9,
+    18
+  ],
+  "captured": {
+    "bert": [
+      1,
+      7,
+      768
+    ],
+    "bert_encoder": [
+      1,
+      7,
+      512
+    ],
+    "predictor.text_encoder": [
+      1,
+      7,
+      640
+    ],
+    "predictor.lstm": [
+      1,
+      7,
+      512
+    ],
+    "predictor.duration_proj": [
+      1,
+      7,
+      50
+    ],
+    "predictor.shared": [
+      1,
+      56,
+      512
+    ],
+    "predictor.F0.0": [
+      1,
+      512,
+      56
+    ],
+    "predictor.F0.1": [
+      1,
+      256,
+      112
+    ],
+    "predictor.F0.2": [
+      1,
+      256,
+      112
+    ],
+    "predictor.F0_proj": [
+      1,
+      1,
+      112
+    ],
+    "predictor.N.0": [
+      1,
+      512,
+      56
+    ],
+    "predictor.N.1": [
+      1,
+      256,
+      112
+    ],
+    "predictor.N.2": [
+      1,
+      256,
+      112
+    ],
+    "predictor.N_proj": [
+      1,
+      1,
+      112
+    ],
+    "text_encoder": [
+      1,
+      512,
+      7
+    ],
+    "decoder.F0_conv": [
+      1,
+      1,
+      56
+    ],
+    "decoder.N_conv": [
+      1,
+      1,
+      56
+    ],
+    "decoder.encode": [
+      1,
+      1024,
+      56
+    ],
+    "decoder.asr_res": [
+      1,
+      64,
+      56
+    ],
+    "decoder.decode.0": [
+      1,
+      1024,
+      56
+    ],
+    "decoder.decode.1": [
+      1,
+      1024,
+      56
+    ],
+    "decoder.decode.2": [
+      1,
+      1024,
+      56
+    ],
+    "decoder.decode.3": [
+      1,
+      512,
+      112
+    ],
+    "decoder.generator.conv_post": [
+      1,
+      22,
+      6721
+    ],
+    "audio": [
+      33600
+    ],
+    "pred_dur": [
+      7
+    ]
+  }
+}

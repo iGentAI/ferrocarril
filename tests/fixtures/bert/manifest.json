@@ -1,0 +1,61 @@
+{
+  "repo_id": "hexgrad/Kokoro-82M",
+  "pth_file": "kokoro-v1_0.pth",
+  "pth_path": "/home/user/.cache/huggingface/hub/models--hexgrad--Kokoro-82M/snapshots/f3ff3571791e39611d31c381e3a41a3af07b4987/kokoro-v1_0.pth",
+  "input_ids": [
+    [
+      0,
+      50,
+      86,
+      54,
+      59,
+      135,
+      0
+    ]
+  ],
+  "attention_mask": [
+    [
+      1,
+      1,
+      1,
+      1,
+      1,
+      1,
+      1
+    ]
+  ],
+  "num_hidden_states": 13,
+  "hidden_state_shape": [
+    1,
+    7,
+    768
+  ],
+  "fixture_files": [
+    "attention_mask.npy",
+    "hidden_00.npy",
+    "hidden_01.npy",
+    "hidden_02.npy",
+    "hidden_03.npy",
+    "hidden_04.npy",
+    "hidden_05.npy",
+    "hidden_06.npy",
+    "hidden_07.npy",
+    "hidden_08.npy",
+    "hidden_09.npy",
+    "hidden_10.npy",
+    "hidden_11.npy",
+    "hidden_12.npy",
+    "input_ids.npy",
+    "last_hidden.npy"
+  ],
+  "config": {
+    "vocab_size": 178,
+    "embedding_size": 128,
+    "hidden_size": 768,
+    "num_hidden_layers": 12,
+    "num_attention_heads": 12,
+    "intermediate_size": 2048,
+    "hidden_act": "gelu_new",
+    "layer_norm_eps": 1e-12
+  }
+}

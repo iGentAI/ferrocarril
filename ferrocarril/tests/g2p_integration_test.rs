@@ -28,9 +28,18 @@ mod tests {
         assert!(result.success, "Basic conversion should succeed");
         assert!(!result.phonemes.is_empty(), "Should produce non-empty phonemes");
         
-        // Should contain expected phonemes for "hello"
-        // HH for HA sound in Hello, etc.
-        assert!(result.phonemes.contains("HH"), "Should contain HH phoneme for 'hello'");
+        // The G2P emits IPA (matching Kokoro's vocab). Check for IPA characters
+        // expected in "Hello, world!": 'ɛ' (vowel of "hello") and 'l'.
+        assert!(
+            result.phonemes.contains("ɛ"),
+            "Should contain 'ɛ' phoneme for 'hello' (got: {})",
+            result.phonemes
+        );
+        assert!(
+            result.phonemes.contains('l'),
+            "Should contain 'l' phoneme (got: {})",
+            result.phonemes
+        );
         
         // Verify the format matches what we expect from the reference implementation
         assert!(result.phonemes.contains(" "), "Phonemes should be space-separated");

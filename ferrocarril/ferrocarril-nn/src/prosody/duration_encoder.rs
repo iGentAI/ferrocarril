@@ -203,8 +203,8 @@ impl DurationEncoder {
         Self { blocks, d_model, style_dim }
     }
 
-    /// Forward pass with EXACT PYTORCH BEHAVIORAL MATCHING - CRITICAL CHANNEL FIX
-    /// PyTorch DurationEncoder returns [B, T, d_model] NOT [B, T, d_model+style_dim]
+    /// Forward pass with EXACT PYTORCH BEHAVIORAL MATCHING
+    /// PyTorch DurationEncoder returns [B, T, d_model+style_dim]
     /// CRITICAL: All input validation MUST be strict - NO SILENT ADAPTATIONS
     pub fn forward(&self,
                txt_feat: &Tensor<f32>,
@@ -283,38 +283,62 @@ impl DurationEncoder {
     // PyTorch: x = x.transpose(0, 1)  # [T,B,C+style] → [B,T,C+style]
     x = self.transpose_tbc_to_btc(&x);
     println!("After transpose(0, 1): shape={:?} [B,T,C+style]", x.shape());
-    
+
     // STRICT: Validate transpose back to batch-first
     assert_eq!(x.shape(), &[b, t, c + self.style_dim],
         "STRICT: Transpose back to batch-first failed");
-    
+
+    // Normalize the loop's working layout to BCT [B, C+style, T]. Both branches
+    // (LSTM and AdaLayerNorm) consume x in BCT, transpose to BTC for their
+    // inner call, and produce BCT output, so x stays in BCT throughout.
+    x = self.transpose_btc_to_bct(&x);
+    assert_eq!(
+        x.shape(),
+        &[b, c + self.style_dim, t],
+        "STRICT: Pre-loop BCT normalization failed - expected [{},{},{}], got {:?}",
+        b,
+        c + self.style_dim,
+        t,
+        x.shape()
+    );
+
     // Process through LSTM and AdaLayerNorm blocks following PyTorch exactly
     for (block_idx, blk) in self.blocks.iter().enumerate() {
         match blk {
             Block::Rnn(rnn) => {
-                // PyTorch: x = x.transpose(-1, -2) before LSTM → [B,C+style,T] 
-                x = self.transpose_btc_to_bct(&x);
-                
-                // Execute LSTM on transposed tensor
-                let x_btc = self.transpose_bct_to_btc(&x); // Back to [B,T,C+style]
-                
-                // STRICT: Validate LSTM input has correct dimensions
-                assert_eq!(x_btc.shape()[2], self.d_model + self.style_dim,
-                    "STRICT: LSTM block {} expects input features {}, got {}. Shape: {:?}",
-                    block_idx, self.d_model + self.style_dim, x_btc.shape()[2], x_btc.shape());
-                
+                assert_eq!(
+                    x.shape()[1],
+                    self.d_model + self.style_dim,
+                    "STRICT: LSTM block {} expects channel dim {}, got shape {:?}",
+                    block_idx,
+                    self.d_model + self.style_dim,
+                    x.shape()
+                );
+
+                let x_btc = self.transpose_bct_to_btc(&x); // [B,C+style,T] → [B,T,C+style]
+
+                assert_eq!(
+                    x_btc.shape()[2],
+                    self.d_model + self.style_dim,
+                    "STRICT: LSTM block {} BTC feature dim {} != expected {}. Shape: {:?}",
+                    block_idx,
+                    x_btc.shape()[2],
+                    self.d_model + self.style_dim,
+                    x_btc.shape()
+                );
+
                 let (h, _) = rnn.forward_batch_first(&x_btc, None, None);
-                
-                // CRITICAL: After bidirectional LSTM, output should be [B,T,d_model] (style dropped)
-                x = self.transpose_btc_to_bct(&h); // [B,d_model,T]
-                
-                // STRICT: Validate LSTM output dropped style channels correctly
+
+                // After bidirectional LSTM, output should be [B, T, d_model]
+                // (style channels dropped). Convert back to BCT.
+                x = self.transpose_btc_to_bct(&h); // [B,T,d_model] → [B,d_model,T]
+
                 assert_eq!(x.shape()[1], self.d_model,
                     "STRICT: LSTM {} should output d_model={} channels, got {}. Shape: {:?}",
                     block_idx, self.d_model, x.shape()[1], x.shape());
-                
+
                 println!("LSTM {} output shape: {:?} - style channels correctly dropped to d_model", block_idx, x.shape());
-                
+
                 // Pad if needed
                 let x_padded = self.pad_tensor_if_needed(&x, masks.shape()[1]);
                 x = x_padded;
@@ -327,7 +351,6 @@ impl DurationEncoder {
                 
                 println!("AdaLayerNorm {} output shape: {:?}", block_idx, x.shape());
                 
-                // CRITICAL: MUST re-add style after AdaLayerNorm for next LSTM iteration
                 // PyTorch: x = torch.cat([x, s.permute(1, 2, 0)], axis=1)
                 let mut style_bct = vec![0.0; b * self.style_dim * x.shape()[2]];
                 let t_current = x.shape()[2];
@@ -355,27 +378,37 @@ impl DurationEncoder {
         }
     }
     
-    // CRITICAL FIX: PyTorch DurationEncoder returns [B,T,d_model] NOT [B,T,d_model+style]
-    // The final bidirectional LSTM should have dropped style channels
-    let final_bct = x; // Current: should be [B, d_model, T] if the last block was LSTM
-    
+    let final_bct = x; // expected [B, d_model + style_dim, T]
+
     // STRICT: Validate final tensor has correct channel count
-    if final_bct.shape()[1] != self.d_model {
-        return panic!("CRITICAL: DurationEncoder final tensor has {} channels, expected d_model={}. \
-                      This indicates the final block was not an LSTM or LSTM didn't drop style correctly. \
-                      Current shape: {:?}", 
-                      final_bct.shape()[1], self.d_model, final_bct.shape());
-    }
-    
-    // PyTorch: return x.transpose(-1, -2)  # [B,d_model,T] → [B,T,d_model] 
+    assert_eq!(
+        final_bct.shape()[1],
+        self.d_model + self.style_dim,
+        "CRITICAL: DurationEncoder final tensor has {} channels, expected d_model+style_dim={}. \
+         Current shape: {:?}",
+        final_bct.shape()[1],
+        self.d_model + self.style_dim,
+        final_bct.shape()
+    );
+
+    // PyTorch: return x.transpose(-1, -2)  # [B,d_model+style,T] → [B,T,d_model+style]
     let final_output = self.transpose_bct_to_btc(&final_bct);
-    
+
     // STRICT: Final output validation
-    assert_eq!(final_output.shape(), &[b, t, self.d_model],
+    assert_eq!(
+        final_output.shape(),
+        &[b, t, self.d_model + self.style_dim],
         "STRICT: DurationEncoder final output shape mismatch: expected [{},{},{}], got {:?}",
-        b, t, self.d_model, final_output.shape());
-    
-    println!("DurationEncoder final output VALIDATED: {:?} [B,T,d_model] - NO STYLE CHANNELS", final_output.shape());
+        b,
+        t,
+        self.d_model + self.style_dim,
+        final_output.shape()
+    );
+
+    println!(
+        "DurationEncoder final output VALIDATED: {:?} [B,T,d_model+style] (matches Python reference)",
+        final_output.shape()
+    );
     final_output
 }
 

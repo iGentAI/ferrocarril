@@ -364,6 +364,9 @@ pub struct CustomBert {
 pub struct BertConfig {
     /// Vocabulary size
     pub vocab_size: usize,
+    /// Factorized token embedding size (ALBERT E parameter). For Kokoro's
+    /// `plbert` this is 128 while `hidden_size` is 768.
+    pub embedding_size: usize,
     /// Hidden size
     pub hidden_size: usize,
     /// Number of attention heads

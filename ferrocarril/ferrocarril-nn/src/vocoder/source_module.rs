@@ -46,7 +46,6 @@ impl SourceModuleHnNSF {
         }
     }
     
-    // Add a convenient method to get mutable access to the linear layer for weight loading
     #[cfg(feature = "weights")]
     pub fn linear_mut(&mut self) -> &mut Linear {
         &mut self.linear

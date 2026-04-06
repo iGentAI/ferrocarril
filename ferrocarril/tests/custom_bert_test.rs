@@ -6,7 +6,7 @@
 #[cfg(test)]
 mod tests {
     use ferrocarril_core::tensor::Tensor;
-    use ferrocarril_nn::bert::transformer::{CustomBert, BertConfig};
+    use ferrocarril_nn::bert::{CustomBert, BertConfig};
     use ferrocarril_nn::Forward;
 
     /// Test the basic functionality of CustomBERT
@@ -15,6 +15,7 @@ mod tests {
         // Create a small BERT config for testing
         let config = BertConfig {
             vocab_size: 100,
+            embedding_size: 128,
             hidden_size: 128,  // Use smaller size to match ALBERT embeddings
             num_attention_heads: 4, // Must divide hidden_size evenly
             num_hidden_layers: 2,
@@ -55,6 +56,7 @@ mod tests {
         // Create a small BERT config for testing
         let config = BertConfig {
             vocab_size: 100,
+            embedding_size: 128,
             hidden_size: 128,  // Use smaller size to match ALBERT embeddings
             num_attention_heads: 4, // Must divide hidden_size evenly
             num_hidden_layers: 2,
@@ -125,6 +127,7 @@ mod tests {
         // Create BERT config
         let bert_config = BertConfig {
             vocab_size: config.n_token,
+            embedding_size: 128,
             hidden_size: config.plbert.hidden_size,
             num_attention_heads: config.plbert.num_attention_heads,
             num_hidden_layers: config.plbert.num_hidden_layers,

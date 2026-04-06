@@ -129,6 +129,7 @@ fn test_layer_1_and_2_with_identical_real_g2p_inputs() -> Result<(), Box<dyn Err
         num_hidden_layers: config.plbert.num_hidden_layers,
         intermediate_size: config.plbert.intermediate_size,
         max_position_embeddings: 512,
+        dropout_prob: 0.0,
     };
     
     let mut bert = CustomAlbert::new(albert_config);
@@ -146,7 +147,7 @@ fn test_layer_1_and_2_with_identical_real_g2p_inputs() -> Result<(), Box<dyn Err
     }
     
     // Test CustomAlbert with IDENTICAL real token IDs as TextEncoder
-    let bert_output = bert.forward(&input_ids_tensor, Some(&attention_mask));
+    let bert_output = bert.forward(&input_ids_tensor, None, Some(&attention_mask));
     println!("LAYER 2 (CustomAlbert): Same real G2P → {:?}", bert_output.shape());
     
     // Validate CustomAlbert output is meaningful
@@ -231,10 +232,11 @@ fn test_layer_3_with_real_layer_1_and_2_outputs() -> Result<(), Box<dyn Error>> 
         num_hidden_layers: config.plbert.num_hidden_layers,
         intermediate_size: config.plbert.intermediate_size,
         max_position_embeddings: 512,
+        dropout_prob: 0.0,
     };
     let mut bert = CustomAlbert::new(albert_config);
     bert.load_weights_binary(&loader, "bert", "module")?;
-    let bert_output = bert.forward(&input_ids_tensor, Some(&attention_mask));
+    let bert_output = bert.forward(&input_ids_tensor, None, Some(&attention_mask));
     println!("REAL Layer 2 output: {:?}", bert_output.shape());
     
     // STEP 2: Test ProsodyPredictor (Layer 2) with STRICT format validation

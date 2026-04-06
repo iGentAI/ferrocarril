@@ -217,6 +217,7 @@ impl FerroModel {
             num_hidden_layers: config.plbert.num_hidden_layers,
             intermediate_size: config.plbert.intermediate_size,
             max_position_embeddings: 512,
+            dropout_prob: 0.0,
         };
 
         let mut bert = CustomAlbert::new(albert_config);
@@ -246,18 +247,17 @@ impl FerroModel {
         prosody_predictor.load_weights_binary(&loader, "predictor", "module")?;
         println!("Prosody predictor weights loaded successfully");
         
-        // Create decoder
         let mut decoder = Decoder::new(
-            config.hidden_dim, // dim_in
-            config.style_dim,  // style_dim
-            config.n_mels,     // dim_out
-            vec![3, 7, 11],    // resblock_kernel_sizes
-            vec![8, 8],        // upsample_rates
-            256,               // upsample_initial_channel
-            vec![vec![1, 3, 5], vec![1, 3, 5], vec![1, 3, 5]], // resblock_dilation_sizes
-            vec![16, 16],      // upsample_kernel_sizes
-            16,                // gen_istft_n_fft
-            4,                 // gen_istft_hop_size
+            config.hidden_dim,
+            config.style_dim,
+            config.n_mels,
+            config.istftnet.resblock_kernel_sizes.clone(),
+            config.istftnet.upsample_rates.clone(),
+            config.istftnet.upsample_initial_channel,
+            config.istftnet.resblock_dilation_sizes.clone(),
+            config.istftnet.upsample_kernel_sizes.clone(),
+            config.istftnet.gen_istft_n_fft,
+            config.istftnet.gen_istft_hop_size,
         );
         
         // Use "decoder" as the component name to match the weight converter output
@@ -304,20 +304,29 @@ impl FerroModel {
         #[cfg(feature = "weights")]
         match (&self.text_encoder, &self.prosody_predictor, &self.decoder, &self.bert, &self.bert_encoder) {
             (Some(text_encoder), Some(prosody_predictor), Some(decoder), Some(bert), Some(bert_encoder)) => {
-                // 1. Convert phonemes to token IDs
-                let mut token_ids = Vec::new();
+                // 1. Convert phonemes to token IDs.
+                //
+                // Kokoro tokenizes the phoneme stream character-by-character,
+                // looking up each single IPA code point (diphthongs like `oʊ`
+                // are TWO tokens: `o` and `ʊ`). Whitespace in the Phonesis
+                // output is a separator, not a token.
+                let mut token_ids: Vec<i64> = Vec::new();
                 token_ids.push(0); // Start of sequence token <bos>
-                
-                // Map phoneme strings to IDs using the vocabulary from the config
-                for phoneme in phonemes.split_whitespace() {
-                    if let Some(&id) = self.config.vocab.get(&phoneme.chars().next().unwrap_or(' ')) {
+
+                for ch in phonemes.chars() {
+                    if ch.is_whitespace() {
+                        continue;
+                    }
+                    if let Some(&id) = self.config.vocab.get(&ch) {
                         token_ids.push(id as i64);
                     } else {
-                        println!("Warning: Phoneme '{}' not in vocabulary, using placeholder", phoneme);
-                        token_ids.push(1); // Use a placeholder token ID
+                        println!(
+                            "Warning: Phoneme {:?} not in vocabulary, skipping",
+                            ch
+                        );
                     }
                 }
-                
+
                 token_ids.push(0); // End of sequence token <eos>
                 
                 // Create tensor from token IDs
@@ -355,7 +364,7 @@ impl FerroModel {
 
                 // 2. Process input through BERT - expects [B, T] input, outputs [B, T, C]
                 let attention_mask = Tensor::from_data(vec![1i64; batch_size * seq_len], vec![batch_size, seq_len]);
-                let bert_output = bert.forward(&input_ids_tensor, Some(&attention_mask));
+                let bert_output = bert.forward(&input_ids_tensor, None, Some(&attention_mask));
                 println!("BERT output shape: {:?}", bert_output.shape());
 
                 // 3. Project BERT output - input [B, T, C], output [B, T, hidden_dim]
@@ -381,28 +390,72 @@ impl FerroModel {
                 let d_en = Tensor::from_data(d_en_bct_data, vec![batch_size, hidden_dim, seq_len]);
                 println!("BERT encoder output transposed to [B, C, T]: {:?}", d_en.shape());
 
-                // 5. Split voice embedding properly
+                // 5. Split voice embedding properly.
+                //
+                // Python Kokoro: `ref_s = pack[len(ps) - 1]` picks the row
+                // from the `[510, 1, 256]` voice pack corresponding to the
+                // current phoneme count, giving a `[1, 256]` tensor. We then
+                // split `[:, :128]` as reference and `[:, 128:]` as style.
+                //
+                // We accept either the raw voice pack (`[510, 256]`) or an
+                // already-indexed `[1, 256]` embedding.
                 let style_dim = self.config.style_dim;
+                let voice_shape = voice_embedding.shape();
 
-                // Validate voice embedding shape
-                if voice_embedding.shape().len() != 2 || voice_embedding.shape()[1] != style_dim * 2 {
-                    panic!("Voice embedding must have shape [B, style_dim*2], got shape {:?}", 
-                          voice_embedding.shape());
-                }
-
-                // Extract reference and style parts
-                let mut ref_part_data = vec![0.0; batch_size * style_dim];
-                let mut style_part_data = vec![0.0; batch_size * style_dim];
-
-                for b in 0..batch_size {
-                    for i in 0..style_dim {
-                        ref_part_data[b * style_dim + i] = voice_embedding[&[b, i]];
-                        style_part_data[b * style_dim + i] = voice_embedding[&[b, i + style_dim]];
+                let (ref_embedding, style_embedding) = if voice_shape.len() == 2
+                    && voice_shape[0] == 510
+                    && voice_shape[1] == style_dim * 2
+                {
+                    // Raw voice pack [510, 256]. Python Kokoro indexes by
+                    // `len(ps) - 1` where `ps` is the phoneme string BEFORE
+                    // BOS/EOS insertion. Our `seq_len` here is
+                    // `num_phonemes + 2` (BOS and EOS were already pushed),
+                    // so the correct row is `seq_len - 3` clamped to the pack.
+                    let raw_phoneme_count = seq_len.saturating_sub(2);
+                    let row_idx =
+                        std::cmp::min(raw_phoneme_count.saturating_sub(1), 509);
+                    let mut ref_data = vec![0.0f32; batch_size * style_dim];
+                    let mut style_data = vec![0.0f32; batch_size * style_dim];
+                    for b in 0..batch_size {
+                        for i in 0..style_dim {
+                            ref_data[b * style_dim + i] =
+                                voice_embedding[&[row_idx, i]];
+                            style_data[b * style_dim + i] =
+                                voice_embedding[&[row_idx, i + style_dim]];
+                        }
                     }
-                }
-
-                let ref_embedding = Tensor::from_data(ref_part_data, vec![batch_size, style_dim]);
-                let style_embedding = Tensor::from_data(style_part_data, vec![batch_size, style_dim]);
+                    (
+                        Tensor::from_data(ref_data, vec![batch_size, style_dim]),
+                        Tensor::from_data(style_data, vec![batch_size, style_dim]),
+                    )
+                } else if voice_shape.len() == 2
+                    && voice_shape[0] == batch_size
+                    && voice_shape[1] == style_dim * 2
+                {
+                    // Legacy pre-indexed embedding [B, 256].
+                    let mut ref_data = vec![0.0f32; batch_size * style_dim];
+                    let mut style_data = vec![0.0f32; batch_size * style_dim];
+                    for b in 0..batch_size {
+                        for i in 0..style_dim {
+                            ref_data[b * style_dim + i] = voice_embedding[&[b, i]];
+                            style_data[b * style_dim + i] =
+                                voice_embedding[&[b, i + style_dim]];
+                        }
+                    }
+                    (
+                        Tensor::from_data(ref_data, vec![batch_size, style_dim]),
+                        Tensor::from_data(style_data, vec![batch_size, style_dim]),
+                    )
+                } else {
+                    panic!(
+                        "Voice embedding must be either a raw pack of shape [510, {}] \
+                         or a pre-indexed embedding of shape [{}, {}], got shape {:?}",
+                        style_dim * 2,
+                        batch_size,
+                        style_dim * 2,
+                        voice_shape
+                    );
+                };
 
                 println!("Reference embedding shape: {:?}", ref_embedding.shape());
                 println!("Style embedding shape: {:?}", style_embedding.shape());
@@ -456,29 +509,12 @@ impl FerroModel {
                 ).map_err(|e| Box::new(e) as Box<dyn Error>)?;
                 println!("Aligned encoder states shape: {:?}", en.shape());
 
-                // 11. Prepare input for predict_f0_noise, which expects [B, F, H]
-                // en is currently [B, C, F] from prosody_predictor.forward
-                let mut en_btf_data = vec![0.0; batch_size * total_frames * hidden_dim];
-                for b in 0..batch_size {
-                    for c in 0..hidden_dim {
-                        for f in 0..total_frames {
-                            if c < en.shape()[1] && f < en.shape()[2] {
-                                en_btf_data[b * total_frames * hidden_dim + f * hidden_dim + c] = 
-                                    en[&[b, c, f]];
-                            } else {
-                                panic!("Index out of bounds when preparing data for predict_f0_noise: b={}, c={}, f={}; en shape={:?}",
-                                      b, c, f, en.shape());
-                            }
-                        }
-                    }
-                }
-
-                let en_btf = Tensor::from_data(en_btf_data, vec![batch_size, total_frames, hidden_dim]);
-                println!("Input for predict_f0_noise: {:?}", en_btf.shape());
-
-                // 12. Predict F0 and noise
-                println!("Calling predict_f0_noise");
-                let (f0_pred, n_pred) = prosody_predictor.predict_f0_noise(&en_btf, &style_embedding)
+                // 11. Predict F0 and noise.
+                //
+                // ProsodyPredictor::predict_f0_noise expects `en` in
+                // `[B, d_model + style_dim, F]` format and transposes to BFC internally.
+                println!("Calling predict_f0_noise with en shape {:?}", en.shape());
+                let (f0_pred, n_pred) = prosody_predictor.predict_f0_noise(&en, &style_embedding)
                     .map_err(|e| Box::new(e) as Box<dyn Error>)?;
                 println!("F0 shape: {:?}, Noise shape: {:?}", f0_pred.shape(), n_pred.shape());
 
@@ -575,111 +611,75 @@ impl FerroModel {
     pub fn load_voice(&self, voice_name: &str) -> Result<Tensor<f32>, Box<dyn Error>> {
         #[cfg(feature = "weights")]
         {
-            // Try to load the voice embedding from the binary weights directory
+            // Try to load the voice embedding from the binary weights directory.
+            // The voice files ship as `[510, 1, 256]` — one `[1, 256]` style
+            // embedding per possible phoneme count. Python Kokoro indexes the
+            // pack by `len(phonemes) - 1` at inference time; we preserve the
+            // full pack here as `[seq_len, embed_dim]` and let
+            // `infer_with_phonemes` do the indexing.
             let weights_dir = std::path::Path::new("../ferrocarril_weights");
             let voices_dir = weights_dir.join("voices");
-            
+
             println!("Attempting to load voice '{}' from {}", voice_name, voices_dir.display());
             if !voices_dir.exists() {
                 println!("Warning: Voices directory not found at {:?}", voices_dir);
                 println!("Returning a default voice embedding for {}", voice_name);
             } else {
-                // Check for voice file
                 let voice_file = voices_dir.join(format!("{}.bin", voice_name));
                 if voice_file.exists() {
                     println!("Loading voice embedding for {} from {:?}", voice_name, voice_file);
-                    
-                    // Read voice file
+
                     let voice_data = std::fs::read(voice_file)?;
-                    let num_elements = voice_data.len() / 4; // Assuming f32 (4 bytes per element)
-                    
-                    // Convert bytes to f32
-                    let mut voice_embedding_flat = vec![0.0; num_elements];
+                    let num_elements = voice_data.len() / 4;
+                    let mut voice_flat = vec![0.0f32; num_elements];
                     for i in 0..num_elements {
-                        let bytes = [
-                            voice_data[i*4], 
-                            voice_data[i*4+1], 
-                            voice_data[i*4+2], 
-                            voice_data[i*4+3]
-                        ];
-                        voice_embedding_flat[i] = f32::from_le_bytes(bytes);
+                        voice_flat[i] = f32::from_le_bytes([
+                            voice_data[i * 4],
+                            voice_data[i * 4 + 1],
+                            voice_data[i * 4 + 2],
+                            voice_data[i * 4 + 3],
+                        ]);
                     }
-                    
-                    // Get the voice JSON file to read the shape
+
                     let voice_json = voices_dir.join(format!("{}.json", voice_name));
                     if voice_json.exists() {
                         let json_str = std::fs::read_to_string(voice_json)?;
                         let json_data: serde_json::Value = serde_json::from_str(&json_str)?;
-                        
-                        // Extract shape from JSON metadata
                         if let Some(shape) = json_data.get("shape") {
                             if let Some(shape_array) = shape.as_array() {
                                 if shape_array.len() >= 3 {
-                                    // Typical shape is [510, 1, 256]
                                     let seq_len = shape_array[0].as_u64().unwrap_or(510) as usize;
                                     let batch = shape_array[1].as_u64().unwrap_or(1) as usize;
-                                    let embed_dim = shape_array[2].as_u64().unwrap_or(256) as usize;
-                                    
-                                    println!("Voice shape from metadata: [{}, {}, {}]", 
-                                             seq_len, batch, embed_dim);
-                                    
-                                    // Verify that our data length matches the expected shape
-                                    let expected_elements = seq_len * batch * embed_dim;
-                                    assert_eq!(num_elements, expected_elements,
-                                             "Voice data length ({}) doesn't match expected shape size ({})",
-                                             num_elements, expected_elements);
-                                    
-                                    // Use config.style_dim for calculations
-                                    let style_dim = self.config.style_dim;
-                                    
-                                    println!("Creating voice embedding with style_dim = {}", style_dim);
-                                    
-                                    // In Kokoro, we take the middle position's embedding from [seq_len, batch, embed_dim]
-                                    // And convert it to [1, style_dim*2] where the first half is reference and second is style
-                                    let mid_position = seq_len / 2;
-                                    
-                                    // Calculate the offset in the flattened array to get to the middle position
-                                    // The raw data is stored as [seq_len, batch, embed_dim]
-                                    let position_start = mid_position * batch * embed_dim;
-                                    
-                                    // Create the final voice embedding with shape [1, style_dim * 2]
-                                    let mut final_embedding = vec![0.0; style_dim * 2];
-                                    
-                                    // Check if we need to adapt the dimensions
-                                    if embed_dim != style_dim {
-                                        println!("Note: Voice embedding dim ({}) != style_dim ({}), adapting dimensions", 
-                                                embed_dim, style_dim);
+                                    let embed_dim =
+                                        shape_array[2].as_u64().unwrap_or(256) as usize;
+
+                                    println!(
+                                        "Voice shape from metadata: [{}, {}, {}]",
+                                        seq_len, batch, embed_dim
+                                    );
+
+                                    let expected = seq_len * batch * embed_dim;
+                                    if num_elements != expected {
+                                        return Err(format!(
+                                            "Voice data length {} != expected {} ({}*{}*{})",
+                                            num_elements, expected, seq_len, batch, embed_dim
+                                        ).into());
                                     }
-                                    
-                                    // Determine how many elements we can copy
-                                    let copy_elements = std::cmp::min(style_dim, embed_dim);
-                                    
-                                    // In Kokoro: ref_s = voice_embedding, style = ref_s[:, 128:], ref = ref_s[:, :128]
-                                    // Fill both halves of the embedding (reference and style)
-                                    // First half: reference embedding
-                                    for i in 0..copy_elements {
-                                        if position_start + i < voice_embedding_flat.len() {
-                                            final_embedding[i] = voice_embedding_flat[position_start + i];
-                                        }
+
+                                    if batch != 1 {
+                                        return Err(format!(
+                                            "Voice pack batch dim must be 1, got {} (shape [{}, {}, {}])",
+                                            batch, seq_len, batch, embed_dim
+                                        ).into());
                                     }
-                                    
-                                    // Second half: style embedding
-                                    for i in 0..copy_elements {
-                                        if position_start + i < voice_embedding_flat.len() {
-                                            final_embedding[i + style_dim] = voice_embedding_flat[position_start + i];
-                                        }
-                                    }
-                                    
-                                    // Create voice tensor with the correct shape: [1, style_dim*2]
-                                    let voice_tensor = Tensor::from_data(final_embedding, vec![1, style_dim * 2]);
-                                    
-                                    // Validate the final shape
-                                    assert_eq!(voice_tensor.shape()[0], 1, "Voice tensor batch dimension should be 1");
-                                    assert_eq!(voice_tensor.shape()[1], style_dim * 2, 
-                                              "Voice tensor feature dimension should be {}, got {}",
-                                              style_dim * 2, voice_tensor.shape()[1]);
-                                    
-                                    println!("Created voice embedding with shape: {:?}", voice_tensor.shape());
+                                    let voice_tensor = Tensor::from_data(
+                                        voice_flat,
+                                        vec![seq_len, embed_dim],
+                                    );
+                                    println!(
+                                        "Loaded voice pack with shape: {:?}",
+                                        voice_tensor.shape()
+                                    );
                                     return Ok(voice_tensor);
                                 }
                             }
@@ -688,15 +688,14 @@ impl FerroModel {
                 }
             }
         }
-        
-        // Fallback to a zero-initialized embedding with correct shape
+
+        // Fallback to a zero-initialized embedding with correct shape.
+        // Keep the legacy `[1, style_dim*2]` shape so any tests that expect
+        // the pre-indexed form still work.
         println!("Creating default voice embedding for {}", voice_name);
         let style_dim = self.config.style_dim;
-        
-        // Create embedding with shape [1, style_dim*2]
         let embedding = vec![0.0; style_dim * 2];
         let voice_tensor = Tensor::from_data(embedding, vec![1, style_dim * 2]);
-        
         println!("Created default voice embedding with shape: {:?}", voice_tensor.shape());
         Ok(voice_tensor)
     }
@@ -735,20 +734,24 @@ impl FerroModel {
             None => return Err("Decoder not loaded".into()),
         };
         
-        // 1. Convert phonemes to token IDs
-        let mut token_ids = Vec::new();
+        // 1. Convert phonemes to token IDs.
+        let mut token_ids: Vec<i64> = Vec::new();
         token_ids.push(0); // Start of sequence token <bos>
-        
-        // Map phoneme strings to IDs using the vocabulary from the config
-        for phoneme in g2p_result.phonemes.split_whitespace() {
-            if let Some(&id) = self.config.vocab.get(&phoneme.chars().next().unwrap_or(' ')) {
+
+        for ch in g2p_result.phonemes.chars() {
+            if ch.is_whitespace() {
+                continue;
+            }
+            if let Some(&id) = self.config.vocab.get(&ch) {
                 token_ids.push(id as i64);
             } else {
-                println!("Warning: Phoneme '{}' not in vocabulary, using placeholder", phoneme);
-                token_ids.push(1); // Use a placeholder token ID
+                println!(
+                    "Warning: Phoneme {:?} not in vocabulary, skipping",
+                    ch
+                );
             }
         }
-        
+
         token_ids.push(0); // End of sequence token <eos>
         
         // Create tensor from token IDs
@@ -784,7 +787,7 @@ impl FerroModel {
             vec![1i64; batch_size * seq_len], // 1=attend, 0=mask 
             vec![batch_size, seq_len]
         );
-        let bert_output = bert.forward(&input_ids_tensor, Some(&attention_mask));
+        let bert_output = bert.forward(&input_ids_tensor, None, Some(&attention_mask));
         let d_en_btc = bert_encoder.forward(&bert_output);
         let t_en = text_encoder.forward(&input_ids_tensor, &input_lengths, &text_mask);
         
@@ -888,26 +891,7 @@ impl FerroModel {
         // Run forward pass with proper alignment and d_en (not d_for_dur)
         let (_, en) = prosody_predictor.forward(&d_en, &style_embedding, &text_mask, &proper_alignment)
             .map_err(|e| Box::new(e) as Box<dyn Error>)?;
-        
-        // Convert en to [B, F, H] format for F0/noise prediction
-        let mut en_btf_data = vec![0.0; batch_size * total_frames * self.config.hidden_dim];
-        for b in 0..batch_size {
-            for f in 0..total_frames {
-                for h in 0..self.config.hidden_dim {
-                    if b < en.shape()[0] && h < en.shape()[1] && f < en.shape()[2] {
-                        en_btf_data[b * total_frames * self.config.hidden_dim + f * self.config.hidden_dim + h] = 
-                            en[&[b, h, f]];
-                    }
-                }
-            }
-        }
-        
-        // Create a properly shaped tensor for [B, F, H]
-        let en_btf = Tensor::from_data(
-            en_btf_data, 
-            vec![batch_size, total_frames, self.config.hidden_dim]
-        );
-        
+
         // Double-check that the style_embedding has the correct dimensions
         // If not, create a new one with the right dimensions
         let effective_style_embedding;
@@ -922,13 +906,12 @@ impl FerroModel {
         } else {
             effective_style_embedding = style_embedding.clone();
         }
-        
-        // Explicitly log shapes right before calling predict_f0_noise
-        println!("Final en_btf shape: {:?}, style_embedding shape: {:?}", 
-                 en_btf.shape(), effective_style_embedding.shape());
-        
+
+        println!("Calling predict_f0_noise with en shape {:?}, style shape {:?}",
+                 en.shape(), effective_style_embedding.shape());
+
         // Predict F0 and noise
-        let (f0_pred, n_pred) = prosody_predictor.predict_f0_noise(&en_btf, &effective_style_embedding)
+        let (f0_pred, n_pred) = prosody_predictor.predict_f0_noise(&en, &effective_style_embedding)
             .map_err(|e| Box::new(e) as Box<dyn Error>)?;
         
         // Create batched alignment

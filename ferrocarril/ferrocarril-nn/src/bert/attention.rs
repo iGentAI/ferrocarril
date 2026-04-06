@@ -193,12 +193,18 @@ impl MultiHeadAttention {
     /// Forward pass for multi-head attention
     /// 
     /// # Arguments
-    /// * `hidden_states` - Input tensor of shape [batch_size, seq_len, hidden_size]
-    /// * `attention_mask` - Optional mask of shape [batch_size, seq_len, seq_len], 
-    ///                      where 1 indicates masked positions to ignore
+    /// * `hidden_states` - Input tensor of shape `[batch_size, seq_len, hidden_size]`.
+    /// * `attention_mask` - Optional attention mask. Two shapes are accepted:
+    ///   - 2D `[batch_size, seq_len]`: per-token visibility, broadcast across
+    ///     all query positions.
+    ///   - 3D `[batch_size, q_seq_len, k_seq_len]`: per query/key pair.
+    ///   In both cases the mask uses the Hugging Face convention
+    ///   `1 = visible (attend)`, `0 = masked (do not attend)`. Masked positions
+    ///   receive a large negative score before softmax so their attention
+    ///   weight goes to ~0.
     /// 
     /// # Returns
-    /// Output tensor of shape [batch_size, seq_len, hidden_size]
+    /// Output tensor of shape `[batch_size, seq_len, hidden_size]`.
     pub fn forward(
         &self,
         hidden_states: &Tensor<f32>,
@@ -325,20 +331,42 @@ impl MultiHeadAttention {
             vec![batch_size, adjusted_num_heads, seq_len, seq_len]
         );
         
-        // Apply attention mask if provided
+        // Apply attention mask if provided.
+        //
+        // Convention: HF / caller convention is `1 = visible (attend)`,
+        // `0 = masked (do not attend)`. The mask may be either 2D
+        // `[batch, seq_len]` (per-token visibility, broadcast over query
+        // positions) or 3D `[batch, q_seq, k_seq]` (per-pair). We support both.
+        // Masked positions get a large negative score so softmax produces ~0.
         if let Some(mask) = attention_mask {
-            // Using binary mask where 1 = masked position, 0 = valid position
-            // For masked positions, set score to negative infinity (we use a large negative value)
+            let mask_shape = mask.shape();
+            let mask_dims = mask_shape.len();
             for b in 0..batch_size {
                 for h in 0..adjusted_num_heads {
                     for q_pos in 0..seq_len {
                         for k_pos in 0..seq_len {
-                            // Make sure we don't access out of bounds in the mask
-                            if b < mask.shape()[0] && q_pos < mask.shape()[1] && k_pos < mask.shape()[2] {
-                                if mask[&[b, q_pos, k_pos]] > 0 {
-                                    // Masked position
-                                    attention_scores[&[b, h, q_pos, k_pos]] = -10000.0;
+                            let visible: bool = match mask_dims {
+                                2 => {
+                                    if b < mask_shape[0] && k_pos < mask_shape[1] {
+                                        mask[&[b, k_pos]] > 0
+                                    } else {
+                                        true
+                                    }
                                 }
+                                3 => {
+                                    if b < mask_shape[0]
+                                        && q_pos < mask_shape[1]
+                                        && k_pos < mask_shape[2]
+                                    {
+                                        mask[&[b, q_pos, k_pos]] > 0
+                                    } else {
+                                        true
+                                    }
+                                }
+                                _ => true, // unsupported rank: skip masking
+                            };
+                            if !visible {
+                                attention_scores[&[b, h, q_pos, k_pos]] = -10000.0;
                             }
                         }
                     }

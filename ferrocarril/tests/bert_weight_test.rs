@@ -10,7 +10,7 @@ use std::path::Path;
 use ferrocarril_core::{Config, tensor::Tensor, LoadWeightsBinary};
 use ferrocarril_core::weights_binary::BinaryWeightLoader;
 use ferrocarril_nn::bert::Bert;
-use ferrocarril_nn::bert::transformer::BertConfig;
+use ferrocarril_nn::bert::BertConfig;
 use ferrocarril_nn::Forward;
 
 #[test]
@@ -29,6 +29,7 @@ fn test_bert_with_real_weights() -> Result<(), Box<dyn Error>> {
     // Create BERT config from model config
     let bert_config = BertConfig {
         vocab_size: config.n_token,
+        embedding_size: 128,
         hidden_size: config.plbert.hidden_size,
         num_attention_heads: config.plbert.num_attention_heads,
         num_hidden_layers: config.plbert.num_hidden_layers,

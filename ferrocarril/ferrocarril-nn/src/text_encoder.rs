@@ -114,39 +114,41 @@ impl LayerNorm {
         // STRICT: Validate input shape exactly
         assert_eq!(input.shape().len(), 3,
             "STRICT: LayerNorm input must be 3D [batch, channels, time], got: {:?}", input.shape());
-            
+
         let (b, c, t) = (input.shape()[0], input.shape()[1], input.shape()[2]);
         let mut out = vec![0.0; b * c * t];
 
         // STRICT: Validate channels match layer configuration
         assert_eq!(c, self.gamma.data().shape()[0],
-            "STRICT: Input channels {} don't match LayerNorm channels {}", 
+            "STRICT: Input channels {} don't match LayerNorm channels {}",
             c, self.gamma.data().shape()[0]);
 
+        let g_data = self.gamma.data();
+        let b_data = self.beta.data();
+        let inv_c = 1.0_f32 / c as f32;
+
         for batch in 0..b {
-            for ch in 0..c {
-                // mean & variance across time dimension
-                let mut mean = 0.0;
-                let mut var  = 0.0;
-                let base_idx = batch * c * t + ch * t;
-                for pos in 0..t {
+            for pos in 0..t {
+                let mut mean = 0.0_f32;
+                let mut sq_sum = 0.0_f32;
+                for ch in 0..c {
                     let v = input[&[batch, ch, pos]];
                     mean += v;
-                    var  += v * v;
+                    sq_sum += v * v;
                 }
-                mean /= t as f32;
-                var  = var / t as f32 - mean * mean;
-
+                mean *= inv_c;
+                let var = sq_sum * inv_c - mean * mean;
                 let denom = (var + self.eps).sqrt();
-                let g = self.gamma.data()[&[ch]];
-                let b_ = self.beta.data()[&[ch]];
 
-                for pos in 0..t {
+                for ch in 0..c {
                     let v = input[&[batch, ch, pos]];
-                    out[base_idx + pos] = (v - mean) / denom * g + b_;
+                    let g = g_data[&[ch]];
+                    let bb = b_data[&[ch]];
+                    out[batch * c * t + ch * t + pos] = (v - mean) / denom * g + bb;
                 }
             }
         }
+
         Tensor::from_data(out, vec![b, c, t])
     }
 }

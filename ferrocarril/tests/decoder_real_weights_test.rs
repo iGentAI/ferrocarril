@@ -90,12 +90,13 @@ fn test_decoder_audio_generation() -> Result<(), Box<dyn Error>> {
     
     // Test with different generation conditions
     let batch_size = 1;
-    let frames = 32;  // Audio frames
-    
+    let frames = 32;  // Audio frames (asr time dim)
+    let curve_frames = 2 * frames;
+
     // Create realistic inputs for audio generation  
     let asr_features = create_realistic_asr_features(batch_size, frames, config.dim_in);
-    let f0_curve = create_realistic_f0_curve(batch_size, frames);
-    let noise_curve = create_realistic_noise_curve(batch_size, frames);
+    let f0_curve = create_realistic_f0_curve(batch_size, curve_frames);
+    let noise_curve = create_realistic_noise_curve(batch_size, curve_frames);
     let style_vector = create_realistic_style_vector(batch_size, config.style_dim);
     
     println!("📊 Audio generation input validation:");
@@ -135,7 +136,7 @@ fn test_decoder_audio_generation() -> Result<(), Box<dyn Error>> {
         "Audio variance too low ({:.6}) - may indicate generation issues", audio_variance);
     
     // VALIDATION 4: Reasonable audio value range (typical speech is -1.0 to 1.0)
-    let max_abs = audio_output.data().iter().map(|&x| x.abs()).fold(0.0, |a, b| a.max(b));
+    let max_abs = audio_output.data().iter().map(|&x| x.abs()).fold(0.0f32, |a, b| a.max(b));
     assert!(max_abs < 10.0, 
         "Audio values too extreme (max abs: {:.3}) - may indicate instability", max_abs);
     
@@ -177,13 +178,13 @@ fn validate_decoder_weights_complete(loader: &BinaryWeightLoader) -> Result<(), 
         "module.encode.conv1.weight_g",           // Encoder block
         "module.decode.0.conv1.weight_g",         // Decode block 0
         "module.decode.3.conv1.weight_g",         // Upsampling decode block
-        "module.generator.ups.0.weight",          // Generator upsampling
+        "module.generator.ups.0.weight_g",        // Generator upsampling
         "module.generator.resblocks.0.conv1.weight_g", // Generator resblocks
         "module.generator.noise_convs.0.weight_g", // Generator noise conv
         "module.generator.conv_post.weight_g",    // Generator final conv
-        "module.F0_conv.weight",                  // F0 downsampling
-        "module.N_conv.weight",                   // Noise downsampling
-        "module.asr_res.0.weight",                // ASR residual
+        "module.F0_conv.weight_g",                // F0 downsampling
+        "module.N_conv.weight_g",                 // Noise downsampling
+        "module.asr_res.0.weight_g",              // ASR residual
     ];
     
     for weight_name in &critical_weights {
@@ -219,12 +220,13 @@ fn validate_decoder_functional_behavior(
     
     // Create realistic inputs based on actual TTS pipeline data
     let batch_size = 1;
-    let frames = 40;   // Audio frames from ProsodyPredictor
+    let frames = 40;   // Audio frames from ProsodyPredictor (asr time dim)
+    let curve_frames = 2 * frames;
     
     // Inputs from prior layers - realistic values, not zeros
     let asr_features = create_realistic_asr_features(batch_size, frames, config.dim_in);
-    let f0_curve = create_realistic_f0_curve(batch_size, frames);
-    let noise_curve = create_realistic_noise_curve(batch_size, frames);
+    let f0_curve = create_realistic_f0_curve(batch_size, curve_frames);
+    let noise_curve = create_realistic_noise_curve(batch_size, curve_frames);
     let style_vector = create_realistic_style_vector(batch_size, config.style_dim);
     
     println!("📊 Input validation:");
@@ -259,7 +261,7 @@ fn validate_decoder_functional_behavior(
         "Audio variance too low ({:.6}) - generation may be too uniform", audio_variance);
     
     // VALIDATION 4: Audio value range validation (speech typically -1.0 to 1.0)
-    let max_abs_value = audio_output.data().iter().map(|&x| x.abs()).fold(0.0, |a, b| a.max(b));
+    let max_abs_value = audio_output.data().iter().map(|&x| x.abs()).fold(0.0f32, |a, b| a.max(b));
     println!("  Max absolute value: {:.6}", max_abs_value);
     
     // Allow reasonable range for generated audio
