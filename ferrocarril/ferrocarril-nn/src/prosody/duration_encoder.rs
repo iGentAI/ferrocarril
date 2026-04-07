@@ -1,5 +1,7 @@
 //! Duration encoder (= several bi-LSTM + AdaLayerNorm blocks)
 
+#![allow(dead_code)]
+
 use crate::{
     lstm::LSTM,
     linear::Linear,

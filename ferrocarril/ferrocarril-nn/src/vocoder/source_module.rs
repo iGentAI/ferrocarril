@@ -1,6 +1,6 @@
 //! SourceModuleHnNSF - Neural Source-Filter Model
 
-use crate::{Parameter, Forward, linear::Linear};
+use crate::{Forward, linear::Linear};
 use ferrocarril_core::tensor::Tensor;
 use super::sinegen::SineGen;
 use rand::Rng;

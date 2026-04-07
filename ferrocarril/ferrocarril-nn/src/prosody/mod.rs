@@ -1,5 +1,11 @@
 //! Prosody predictor (duration, F0, noise) – Rust port of kokoro implementation with STRICT VALIDATION
 
+// Several helper methods and loop-binding variables below are kept for
+// documentation / shape-validation purposes even when the optimised forward
+// path doesn't read them. Suppress dead-code and unused-variable warnings
+// module-wide so the build log stays clean.
+#![allow(dead_code, unused_variables)]
+
 use crate::{
     lstm::LSTM,
     linear::Linear,

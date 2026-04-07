@@ -79,19 +79,25 @@ pub struct PlbertConfig {
 }
 
 impl Config {
+    /// Load a `Config` from a JSON file path. This is a thin wrapper
+    /// around [`Config::from_json_str`] that reads the file contents
+    /// first. For environments without a filesystem (e.g. WebAssembly),
+    /// use `from_json_str` directly with an already-loaded string.
     pub fn from_json(path: &str) -> Result<Self, Box<dyn Error>> {
-        // Implement actual JSON parsing instead of hardcoded values
         use std::fs::File;
         use std::io::Read;
-        
+
         let mut file = File::open(path)?;
         let mut contents = String::new();
         file.read_to_string(&mut contents)?;
+        Self::from_json_str(&contents)
+    }
+
+    /// Parse a `Config` directly from a JSON string. Performs no
+    /// filesystem I/O and is safe to call from WebAssembly.
+    pub fn from_json_str(json: &str) -> Result<Self, Box<dyn Error>> {
+        let config: serde_json::Value = serde_json::from_str(json)?;
         
-        // Use serde_json to parse the JSON file
-        let config: serde_json::Value = serde_json::from_str(&contents)?;
-        
-        // Extract values from the JSON
         let n_token = config["n_token"].as_u64().unwrap_or(150) as usize;
         let hidden_dim = config["hidden_dim"].as_u64().unwrap_or(512) as usize;
         let n_layer = config["n_layer"].as_u64().unwrap_or(4) as usize;
@@ -237,6 +243,7 @@ impl Parameter {
 /// Phonesis-based G2P component for Ferrocarril
 pub struct PhonesisG2P {
     inner: Arc<Mutex<dyn GraphemeToPhoneme + Send + Sync>>,
+    #[allow(dead_code)]
     language: String,
     standard: PhonemeStandard,
 }
@@ -291,7 +298,10 @@ impl PhonesisG2P {
                     
                     match fallback_g2p.convert_to_standard(text, self.standard) {
                         Ok(phonemes) => {
-                            println!("Warning: Using grapheme fallback for unknown word(s) in: '{}'", text);
+                            eprintln!(
+                                "ferrocarril: warning: using grapheme fallback for unknown word(s) in: '{}'",
+                                text
+                            );
                             Ok(phonemes.join(" "))
                         },
                         Err(e) => {

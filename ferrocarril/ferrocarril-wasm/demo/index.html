@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ferrocarril Wasm Demo</title>
+<style>
+    body {
+        font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+        max-width: 820px;
+        margin: 40px auto;
+        padding: 0 20px;
+        background: #0f0f14;
+        color: #d8d8e0;
+        line-height: 1.5;
+    }
+    h1, h2 { color: #ffffff; }
+    h1 { font-size: 1.7rem; margin-bottom: 0.2rem; }
+    h2 { font-size: 1.15rem; margin-top: 1.8rem; border-bottom: 1px solid #333; padding-bottom: 0.3rem; }
+    .sub { color: #8b8ba0; margin-top: 0; }
+    code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    pre {
+        background: #1a1a24;
+        border: 1px solid #2a2a36;
+        padding: 10px 14px;
+        border-radius: 6px;
+        overflow-x: auto;
+    }
+    button {
+        background: #3563c6;
+        border: none;
+        color: white;
+        padding: 9px 16px;
+        border-radius: 6px;
+        font-size: 0.95rem;
+        cursor: pointer;
+    }
+    button:hover:not([disabled]) { background: #4775d8; }
+    button[disabled] { background: #2a2a36; color: #666; cursor: not-allowed; }
+    input[type="text"] {
+        background: #1a1a24;
+        border: 1px solid #2a2a36;
+        color: #d8d8e0;
+        padding: 8px 12px;
+        border-radius: 6px;
+        font-size: 0.95rem;
+        width: 100%;
+        box-sizing: border-box;
+    }
+    .row { display: flex; gap: 10px; align-items: center; margin: 10px 0; }
+    .status {
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        white-space: pre-wrap;
+        background: #1a1a24;
+        border: 1px solid #2a2a36;
+        padding: 10px;
+        border-radius: 6px;
+        min-height: 2em;
+        font-size: 0.88rem;
+    }
+    .ok { color: #6fc26f; }
+    .err { color: #e27373; }
+    audio { width: 100%; margin-top: 10px; }
+    a { color: #79a6ff; }
+</style>
+</head>
+<body>
+<h1>Ferrocarril Wasm Demo</h1>
+<p class="sub">
+    Pure-Rust Kokoro-82M TTS running inside your browser via
+    <code>wasm-bindgen</code>. No ONNX Runtime, no server calls during
+    inference.
+</p>
+
+<h2>1. Smoke test: load the wasm module</h2>
+<p>
+    Initialises the wasm binary and constructs an empty
+    <code>WasmFerroModelBuilder</code> to confirm the bindings are
+    reachable. Does not fetch any weights.
+</p>
+<div class="row">
+    <button id="smokeBtn">Run smoke test</button>
+</div>
+<div id="smokeStatus" class="status">(not run)</div>
+
+<h2>2. Full inference: fetch weights &amp; synthesise</h2>
+<p>
+    Loads the full 341 MB Kokoro weight pack from <code>./weights/</code>,
+    builds the model, and synthesises a short IPA utterance. The IPA
+    must match Kokoro's vocabulary (see
+    <code>kokoro/tokenizer.py</code> in the reference repo).
+</p>
+<div class="row">
+    <input id="ipaInput" type="text" value="hɛlqʊ" placeholder="IPA phonemes, e.g. hɛlqʊ">
+</div>
+<div class="row">
+    <button id="loadBtn">1. Load weights</button>
+    <button id="speakBtn" disabled>2. Synthesise</button>
+</div>
+<div id="fullStatus" class="status">(not run)</div>
+<audio id="player" controls></audio>
+
+<p style="margin-top: 2rem; color: #6a6a80; font-size: 0.85rem;">
+    Source: <a href="https://github.com/iGentAI/ferrocarril">iGentAI/ferrocarril</a>
+    &middot; Licence: Apache-2.0 (weights) / MIT (this crate)
+</p>
+
+<script type="module" src="./main.js"></script>
+</body>
+</html>

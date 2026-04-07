@@ -8,43 +8,6 @@ use crate::{conv::Conv1d, lstm::LSTM, Forward, Parameter};
 use ferrocarril_core::tensor::Tensor;
 use std::sync::Arc;
 
-/// Helper function for applying a mask to a tensor - STRICT VERSION
-fn mask_fill_strict(x: &mut Tensor<f32>, mask: &Tensor<bool>, value: f32) {
-    // STRICT: Verify compatible shapes exactly - no adaptive behavior
-    assert_eq!(x.shape()[0], mask.shape()[0], 
-        "STRICT: Batch dimension mismatch - tensor: {}, mask: {}", x.shape()[0], mask.shape()[0]);
-    
-    // For [B, T, C] tensor with [B, T] mask
-    if x.shape().len() == 3 && x.shape()[1] == mask.shape()[1] {
-        // Apply mask
-        for b in 0..mask.shape()[0] {
-            for t in 0..mask.shape()[1] {
-                if mask[&[b, t]] {
-                    for c in 0..x.shape()[2] {
-                        x[&[b, t, c]] = value;
-                    }
-                }
-            }
-        }
-    } 
-    // For [B, C, T] tensor with [B, T] mask
-    else if x.shape().len() == 3 && x.shape()[2] == mask.shape()[1] {
-        // Apply mask
-        for b in 0..mask.shape()[0] {
-            for t in 0..mask.shape()[1] {
-                if mask[&[b, t]] {
-                    for c in 0..x.shape()[1] {
-                        x[&[b, c, t]] = value;
-                    }
-                }
-            }
-        }
-    } else {
-        panic!("STRICT: Incompatible tensor shapes for mask_fill - tensor: {:?}, mask: {:?}", 
-               x.shape(), mask.shape());
-    }
-}
-
 // -------------------------------------------------
 // Helper: embedding (gather along 0-th dim)
 // -------------------------------------------------
@@ -289,7 +252,7 @@ impl TextEncoder {
         let mut x_bct = self.transpose_btc_to_bct_strict(&x);        
 
         // 3. CNN processing with masking after each layer
-        for (i, blk) in self.cnn.iter().enumerate() {
+        for (_i, blk) in self.cnn.iter().enumerate() {
             x_bct = blk.forward(&x_bct);
             
             // Apply mask after each CNN block

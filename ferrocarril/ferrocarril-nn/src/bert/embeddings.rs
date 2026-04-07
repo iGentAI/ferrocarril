@@ -3,7 +3,8 @@
 //! This module provides embeddings for ALBERT, including token embeddings,
 //! position embeddings, and token type embeddings.
 
-use std::error::Error;
+#![allow(dead_code)]
+
 use ferrocarril_core::tensor::Tensor;
 use ferrocarril_core::{Parameter, LoadWeightsBinary, FerroError};
 use ferrocarril_core::weights_binary::BinaryWeightLoader;

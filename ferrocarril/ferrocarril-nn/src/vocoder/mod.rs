@@ -1,5 +1,11 @@
 //! Vocoder module for waveform generation
 
+// Several helper methods, loop variables, and the `upsample_rates` field on
+// `Generator` are kept as documentation / shape-validation aids even when the
+// optimised forward path doesn't read them. Suppress dead-code and
+// unused-variable warnings module-wide so the build log stays clean.
+#![allow(dead_code, unused_variables)]
+
 mod sinegen;
 mod source_module;
 mod adain_resblk1;
@@ -11,16 +17,13 @@ pub use adain_resblk1::{AdaINResBlock1, snake1d};
 pub use adain_resblk1d::AdainResBlk1d;
 
 use crate::{
-    Parameter,
     Forward,
     conv::Conv1d,
     conv_transpose::ConvTranspose1d,
-    adain::AdaIN1d,
-    linear::Linear,
 };
 use ferrocarril_core::tensor::Tensor;
 use ferrocarril_core::FerroError;
-use ferrocarril_dsp::stft::{CustomSTFT, StftConfig};
+use ferrocarril_dsp::stft::CustomSTFT;
 use std::sync::Arc;
 
 #[cfg(feature = "weights")]
@@ -475,6 +478,23 @@ impl Generator {
     }
 
     pub fn forward(&self, x: &Tensor<f32>, s: &Tensor<f32>, f0: &Tensor<f32>) -> Result<Tensor<f32>, FerroError> {
+        let profile = std::env::var("FERRO_PROFILE").is_ok();
+        let t_start = std::time::Instant::now();
+        let mut t_mark = t_start;
+        macro_rules! gstage {
+            ($name:expr) => {
+                if profile {
+                    let now = std::time::Instant::now();
+                    eprintln!(
+                        "[profile]   gen {:<34} {:>9.3} ms",
+                        $name,
+                        (now - t_mark).as_secs_f64() * 1000.0
+                    );
+                    t_mark = now;
+                }
+            };
+        }
+
         // Verify input shapes
         if x.shape().len() != 3 {
             panic!("Generator input x must be 3-dimensional [B, C, T], got: {:?}", x.shape());
@@ -521,8 +541,11 @@ impl Generator {
             }
             Tensor::from_data(transposed, vec![b, t_up, 1])
         };
+        gstage!("upsample_f0 + transpose");
+
         // Generate source signals
         let (har_source, _noise_source, _uv) = self.source.forward(&f0_upsampled);
+        gstage!("source.forward (SineGen)");
 
         // Ensure harmonic source has the right shape for STFT
         let har_source_for_stft = if har_source.shape().len() == 3 {
@@ -543,6 +566,7 @@ impl Generator {
         } else {
             panic!("Harmonic source has unexpected shape: {:?}", har_source.shape());
         };
+        gstage!("har source shape prep");
         
         // Verify STFT input has sufficient samples - STRICT: NO SYNTHETIC FALLBACKS
         if har_source_for_stft.shape()[1] < self.gen_istft_n_fft {
@@ -556,8 +580,7 @@ impl Generator {
         
         // Apply STFT to get harmonic spectrogram
         let (har_spec, har_phase) = self.stft.transform(&har_source_for_stft);
-
-        // Verify STFT output shapes match
+        gstage!("STFT transform");
         if har_spec.shape() != har_phase.shape() {
             panic!("STFT output shape mismatch: spec {:?}, phase {:?}",
                    har_spec.shape(), har_phase.shape());
@@ -587,6 +610,7 @@ impl Generator {
         }
         
         let har = Tensor::from_data(har_data, vec![batch, freq_bins * 2, frames]);
+        gstage!("har concat (spec + phase)");
 
         // Upsampling network - process the input through ups layers
         let mut hidden = x.clone();
@@ -603,11 +627,9 @@ impl Generator {
             }
             hidden = Tensor::from_data(hidden_data, hidden.shape().to_vec());
             
-            // Process noise source through convolution and residual pathway
             let x_source = self.noise_convs[i].forward(&har);
             let x_source = self.noise_res[i].forward(&x_source, s);
-            
-            // Apply transpose convolution
+            gstage!(format!("stage {} leaky + noise_conv + noise_res", i).as_str());
             hidden = self.ups[i].forward(&hidden);
 
             // ReflectionPad1d((1, 0)) after the last transposed convolution
@@ -658,8 +680,7 @@ impl Generator {
                     hidden.shape(), x_source.shape()
                 );
             }
-            
-            // Apply ResBlocks
+            gstage!(format!("stage {} ups + pad + combine", i).as_str());
             let mut xs: Option<Tensor<f32>> = None;
             
             for j in 0..self.num_kernels {
@@ -685,6 +706,7 @@ impl Generator {
                     xs = Some(xj);
                 }
             }
+            gstage!(format!("stage {} resblocks ({}x)", i, self.num_kernels).as_str());
             
             // Average by num_kernels
             if let Some(xs_val) = xs {
@@ -694,6 +716,7 @@ impl Generator {
                 }
                 hidden = Tensor::from_data(xs_data, xs_val.shape().to_vec());
             }
+            gstage!(format!("stage {} average", i).as_str());
         }
         
         // Apply final LeakyReLU and post-convolution
@@ -708,8 +731,7 @@ impl Generator {
         hidden = Tensor::from_data(hidden_data, hidden.shape().to_vec());
         
         let x = self.conv_post.forward(&hidden);
-        
-        // Split into magnitude and phase
+        gstage!("final leaky + conv_post");
         let (batch, channels, time) = (x.shape()[0], x.shape()[1], x.shape()[2]);
         let n_fft_half = self.post_n_fft / 2 + 1;
         
@@ -745,9 +767,21 @@ impl Generator {
         
         let spec_tensor = Tensor::from_data(spec_data, vec![batch, n_fft_half, time]);
         let phase_tensor = Tensor::from_data(phase_data, vec![batch, n_fft_half, time]);
+        gstage!("spec/phase split (exp + sin)");
         
         // Generate waveform using iSTFT
-        Ok(self.stft.inverse(&spec_tensor, &phase_tensor))
+        let audio = self.stft.inverse(&spec_tensor, &phase_tensor);
+        gstage!("iSTFT inverse");
+
+        if profile {
+            let total = (std::time::Instant::now() - t_start).as_secs_f64() * 1000.0;
+            eprintln!(
+                "[profile]   gen {:<34} {:>9.3} ms",
+                "TOTAL Generator::forward", total
+            );
+        }
+
+        Ok(audio)
     }
 }
 
@@ -833,6 +867,23 @@ impl Decoder {
         n: &Tensor<f32>,
         s: &Tensor<f32>,
     ) -> Result<Tensor<f32>, FerroError> {
+        let profile = std::env::var("FERRO_PROFILE").is_ok();
+        let t_start = std::time::Instant::now();
+        let mut t_mark = t_start;
+        macro_rules! dstage {
+            ($name:expr) => {
+                if profile {
+                    let now = std::time::Instant::now();
+                    eprintln!(
+                        "[profile]  dec {:<34} {:>9.3} ms",
+                        $name,
+                        (now - t_mark).as_secs_f64() * 1000.0
+                    );
+                    t_mark = now;
+                }
+            };
+        }
+
         assert_eq!(
             asr.shape().len(),
             3,
@@ -898,6 +949,7 @@ impl Decoder {
 
         let f0 = self.f0_conv.forward(&f0_bct);
         let nn_ = self.n_conv.forward(&n_bct);
+        dstage!("f0_conv + n_conv");
 
         assert_eq!(
             f0.shape(),
@@ -919,8 +971,10 @@ impl Decoder {
         let x = self.concat_channels(&[asr, &f0, &nn_]);
 
         let mut x = self.encode.forward(&x, s);
+        dstage!("concat + encode AdainResBlk1d");
 
         let asr_res = self.asr_res.forward(asr);
+        dstage!("asr_res Conv1d");
 
         let mut res = true;
         for (i, block) in self.decode.iter().enumerate() {
@@ -931,9 +985,21 @@ impl Decoder {
             if block.is_upsample() {
                 res = false;
             }
+            dstage!(format!("decode block {} ({})", i, if block.is_upsample() { "upsample" } else { "plain" }).as_str());
         }
 
-        self.generator.forward(&x, s, f0_curve)
+        let audio = self.generator.forward(&x, s, f0_curve)?;
+        dstage!("generator.forward");
+
+        if profile {
+            let total = (std::time::Instant::now() - t_start).as_secs_f64() * 1000.0;
+            eprintln!(
+                "[profile]  dec {:<34} {:>9.3} ms",
+                "TOTAL Decoder::forward", total
+            );
+        }
+
+        Ok(audio)
     }
 
     /// Concatenate 3D tensors along the channel dimension.
@@ -1010,21 +1076,23 @@ impl LoadWeightsBinary for Generator {
         component: &str,
         prefix: &str
     ) -> Result<(), FerroError> {
-        println!("Loading Generator weights for {}.{}", component, prefix);
-        
         // Load source module. Python: `self.m_source = SourceModuleHnNSF(...)`
         let source_prefix = format!("{}.m_source", prefix);
         if let Err(e) = self.source.load_weights_binary(loader, component, &source_prefix) {
-            println!("Warning: Failed to load source module weights at '{}.{}': {}",
-                     component, source_prefix, e);
-            println!("Continuing with default random weights for source module");
+            eprintln!(
+                "ferrocarril: warning: failed to load source module weights at '{}.{}': {} (continuing with default-init source)",
+                component, source_prefix, e
+            );
         }
         
         // Load upsampling blocks
         for (i, block) in self.ups.iter_mut().enumerate() {
             let ups_prefix = format!("{}.ups.{}", prefix, i);
             if let Err(e) = block.load_weights_binary(loader, component, &ups_prefix) {
-                println!("Warning: Failed to load ups.{} weights: {}", i, e);
+                eprintln!(
+                    "ferrocarril: warning: failed to load ups.{} weights: {}",
+                    i, e
+                );
             }
         }
 
@@ -1034,10 +1102,16 @@ impl LoadWeightsBinary for Generator {
             if let Some(block_ptr) = Arc::get_mut(block) {
                 let block_prefix = format!("{}.resblocks.{}", prefix, i);
                 if let Err(e) = block_ptr.load_weights_binary(loader, component, &block_prefix) {
-                    println!("Warning: Failed to load resblocks.{} weights: {}", i, e);
+                    eprintln!(
+                        "ferrocarril: warning: failed to load resblocks.{} weights: {}",
+                        i, e
+                    );
                 }
             } else {
-                println!("Warning: Failed to get mutable reference to resblock {}", i);
+                eprintln!(
+                    "ferrocarril: warning: could not get mutable reference to resblock {}",
+                    i
+                );
             }
         }
         
@@ -1045,7 +1119,10 @@ impl LoadWeightsBinary for Generator {
         for (i, conv) in self.noise_convs.iter_mut().enumerate() {
             let noise_conv_prefix = format!("{}.noise_convs.{}", prefix, i);
             if let Err(e) = conv.load_weights_binary(loader, component, &noise_conv_prefix) {
-                println!("Warning: Failed to load noise_convs.{} weights: {}", i, e);
+                eprintln!(
+                    "ferrocarril: warning: failed to load noise_convs.{} weights: {}",
+                    i, e
+                );
             }
         }
         
@@ -1055,18 +1132,26 @@ impl LoadWeightsBinary for Generator {
             if let Some(block_ptr) = Arc::get_mut(block) {
                 let block_prefix = format!("{}.noise_res.{}", prefix, i);
                 if let Err(e) = block_ptr.load_weights_binary(loader, component, &block_prefix) {
-                    println!("Warning: Failed to load noise_res.{} weights: {}", i, e);
+                    eprintln!(
+                        "ferrocarril: warning: failed to load noise_res.{} weights: {}",
+                        i, e
+                    );
                 }
             } else {
-                println!("Warning: Failed to get mutable reference to noise_res block {}", i);
+                eprintln!(
+                    "ferrocarril: warning: could not get mutable reference to noise_res block {}",
+                    i
+                );
             }
         }
         
         // Load final projection (conv_post)
         let conv_post_prefix = format!("{}.conv_post", prefix);
         if let Err(e) = self.conv_post.load_weights_binary(loader, component, &conv_post_prefix) {
-            println!("Warning: Failed to load conv_post weights at '{}.{}': {}",
-                     component, conv_post_prefix, e);
+            eprintln!(
+                "ferrocarril: warning: failed to load conv_post weights at '{}.{}': {}",
+                component, conv_post_prefix, e
+            );
         }
         
         Ok(())
@@ -1081,11 +1166,12 @@ impl LoadWeightsBinary for Decoder {
         component: &str,
         prefix: &str
     ) -> Result<(), FerroError> {
-        println!("Loading Decoder weights for {}.{}", component, prefix);
-
         let generator_prefix = format!("{}.generator", prefix);
         if let Err(e) = self.generator.load_weights_binary(loader, component, &generator_prefix) {
-            println!("Warning: Failed to load generator weights: {}", e);
+            eprintln!(
+                "ferrocarril: warning: failed to load generator weights: {}",
+                e
+            );
         }
 
         let encode_prefix = format!("{}.encode", prefix);
@@ -1124,17 +1210,26 @@ impl LoadWeightsBinary for Decoder {
 
         let f0_conv_prefix = format!("{}.F0_conv", prefix);
         if let Err(e) = self.f0_conv.load_weights_binary(loader, component, &f0_conv_prefix) {
-            println!("Warning: Failed to load F0_conv weights: {}", e);
+            eprintln!(
+                "ferrocarril: warning: failed to load F0_conv weights: {}",
+                e
+            );
         }
 
         let n_conv_prefix = format!("{}.N_conv", prefix);
         if let Err(e) = self.n_conv.load_weights_binary(loader, component, &n_conv_prefix) {
-            println!("Warning: Failed to load N_conv weights: {}", e);
+            eprintln!(
+                "ferrocarril: warning: failed to load N_conv weights: {}",
+                e
+            );
         }
 
         let asr_res_prefix = format!("{}.asr_res.0", prefix);
         if let Err(e) = self.asr_res.load_weights_binary(loader, component, &asr_res_prefix) {
-            println!("Warning: Failed to load asr_res weights: {}", e);
+            eprintln!(
+                "ferrocarril: warning: failed to load asr_res weights: {}",
+                e
+            );
         }
 
         Ok(())
@@ -1149,8 +1244,6 @@ impl LoadWeightsBinary for SourceModuleHnNSF {
         component: &str,
         prefix: &str
     ) -> Result<(), FerroError> {
-        println!("Loading SourceModule weights for {}.{}", component, prefix);
-
         let linear_prefix = format!("{}.l_linear", prefix);
         self.linear_mut().load_weights_binary(loader, component, &linear_prefix)
             .map_err(|e| FerroError::new(format!(

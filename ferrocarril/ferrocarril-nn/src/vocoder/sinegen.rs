@@ -1,6 +1,5 @@
 //! Sine wave generator for neural source-filter model 
 
-use crate::{Parameter, Forward};
 use ferrocarril_core::tensor::Tensor;
 use rand::Rng;
 

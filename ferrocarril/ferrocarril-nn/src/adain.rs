@@ -13,7 +13,7 @@ use ferrocarril_core::LoadWeightsBinary;
 #[derive(Debug)]
 pub struct InstanceNorm1d {
     num_features: usize,
-    eps: f32,
+    pub(crate) eps: f32,
     affine: bool,
     weight: Option<Parameter>,
     bias: Option<Parameter>,
@@ -39,27 +39,8 @@ impl InstanceNorm1d {
         }
     }
 
-    /// Compute mean and variance for a channel
-    fn compute_stats(&self, data: &[f32]) -> (f32, f32) {
-        let len = data.len() as f32;
-
-        // Compute mean
-        let mean = data.iter().sum::<f32>() / len;
-
-        // Compute variance
-        let var = data.iter()
-            .map(|x| (x - mean) * (x - mean))
-            .sum::<f32>() / len;
-
-        (mean, var)
-    }
-
-    /// Normalize data
-    fn normalize(&self, data: &[f32], mean: f32, var: f32) -> Vec<f32> {
-        let inv_std = 1.0 / (var + self.eps).sqrt();
-        data.iter()
-            .map(|&x| (x - mean) * inv_std)
-            .collect()
+    pub fn num_features(&self) -> usize {
+        self.num_features
     }
 }
 
@@ -67,43 +48,82 @@ impl Forward for InstanceNorm1d {
     type Output = Tensor<f32>;
 
     fn forward(&self, input: &Tensor<f32>) -> Self::Output {
+        // Direct-slice implementation. Three contiguous passes per
+        // `(batch, channel)`: mean, variance, then normalize+affine.
+        // Each pass streams `length` contiguous f32s from a single
+        // slice, which LLVM auto-vectorises.
         let shape = input.shape();
-        assert_eq!(shape.len(), 3, "Expected 3D input [batch, channels, length]");
-
+        assert_eq!(
+            shape.len(),
+            3,
+            "InstanceNorm1d: expected 3D input [batch, channels, length], got {:?}",
+            shape
+        );
         let (batch, channels, length) = (shape[0], shape[1], shape[2]);
-        assert_eq!(channels, self.num_features, "Channel mismatch");
+        assert_eq!(
+            channels, self.num_features,
+            "InstanceNorm1d: input channels {} != configured num_features {}",
+            channels, self.num_features
+        );
 
-        let mut output_data = Vec::with_capacity(batch * channels * length);
+        let x_data = input.data();
+        let mut out = vec![0.0f32; batch * channels * length];
+
+        let len_f = length as f32;
+        let inv_len = 1.0f32 / len_f;
+
+        // Optional affine weight/bias (Kokoro uses affine=false; the
+        // code below reads them only when `self.affine` is set so the
+        // fast path has no branch inside the inner loop).
+        let aff_w: Option<&[f32]> = self.weight.as_ref().map(|p| p.data().data());
+        let aff_b: Option<&[f32]> = self.bias.as_ref().map(|p| p.data().data());
 
         for b in 0..batch {
+            let b_off = b * channels * length;
             for c in 0..channels {
-                // Extract channel data
-                let mut channel_data = Vec::with_capacity(length);
-                for l in 0..length {
-                    channel_data.push(input[&[b, c, l]]);
+                let start = b_off + c * length;
+                let chan = &x_data[start..start + length];
+
+                // Pass 1: sum → mean
+                let mut sum = 0.0f32;
+                for &v in chan {
+                    sum += v;
                 }
+                let mean = sum * inv_len;
 
-                // Compute stats and normalize
-                let (mean, var) = self.compute_stats(&channel_data);
-                let normalized = self.normalize(&channel_data, mean, var);
+                // Pass 2: sum of squared deviations → variance → inv_std
+                let mut sq_sum = 0.0f32;
+                for &v in chan {
+                    let d = v - mean;
+                    sq_sum += d * d;
+                }
+                let var = sq_sum * inv_len;
+                let inv_std = 1.0f32 / (var + self.eps).sqrt();
 
-                // Apply affine transformation if enabled
-                let transformed = if self.affine {
-                    let weight = self.weight.as_ref().unwrap().data();
-                    let bias = self.bias.as_ref().unwrap().data();
-
-                    normalized.iter()
-                        .map(|&x| x * weight[&[c]] + bias[&[c]])
-                        .collect()
+                // Pass 3: normalize, then optionally affine.
+                let out_chan = &mut out[start..start + length];
+                if self.affine {
+                    let w = aff_w.unwrap()[c];
+                    let bv = aff_b.unwrap()[c];
+                    // y = w * ((x - mean) * inv_std) + bv
+                    //   = (w * inv_std) * x + (bv - w * inv_std * mean)
+                    let scale = w * inv_std;
+                    let offset = bv - mean * scale;
+                    for (dst, &v) in out_chan.iter_mut().zip(chan.iter()) {
+                        *dst = v * scale + offset;
+                    }
                 } else {
-                    normalized
-                };
-
-                output_data.extend(transformed);
+                    // y = (x - mean) * inv_std
+                    //   = inv_std * x - mean * inv_std
+                    let offset = -mean * inv_std;
+                    for (dst, &v) in out_chan.iter_mut().zip(chan.iter()) {
+                        *dst = v * inv_std + offset;
+                    }
+                }
             }
         }
 
-        Tensor::from_data(output_data, shape.to_vec())
+        Tensor::from_data(out, shape.to_vec())
     }
 }
 
@@ -123,6 +143,7 @@ impl Forward for InstanceNorm1d {
 /// `LoadWeightsBinary` below.
 #[derive(Debug)]
 pub struct AdaIN1d {
+    #[allow(dead_code)]
     style_dim: usize,
     num_features: usize,
     pub fc: Linear,
@@ -154,12 +175,23 @@ impl AdaIN1d {
         }
     }
 
+    /// Forward pass.
+    ///
+    /// Fused implementation: computes `y = (1 + gamma) * normalize(x) + beta`
+    /// without materialising the intermediate normalised tensor. Per
+    /// `(batch, channel)`:
+    ///   1. Compute mean (contiguous sum over `length` elements).
+    ///   2. Compute variance (contiguous sum of squared deviations).
+    ///   3. Combine the normalize + affine into a single
+    ///      `y = scale * x + offset` pass, where
+    ///      `scale = (1 + gamma) * inv_std` and
+    ///      `offset = beta - mean * scale`.
+    ///
+    /// All three passes are contiguous `length`-element loops that the
+    /// compiler auto-vectorises into wide SIMD FMA sequences.
     pub fn forward(&self, x: &Tensor<f32>, style: &Tensor<f32>) -> Tensor<f32> {
-        // Style transformation
+        // Style → gamma/beta.
         let h = self.fc.forward(style);
-
-        // Shape sanity: style FC must emit 2 * num_features so we can split
-        // into gamma and beta.
         let h_shape = h.shape();
         assert_eq!(
             h_shape.len(),
@@ -174,51 +206,79 @@ impl AdaIN1d {
             h_shape[1],
             2 * self.num_features
         );
-        let batch = h_shape[0];
+        let h_data = h.data();
+        let h_row_stride = 2 * self.num_features;
 
-        // Split into gamma and beta
-        let mut gamma_data = Vec::with_capacity(batch * self.num_features);
-        let mut beta_data = Vec::with_capacity(batch * self.num_features);
-
-        for b in 0..batch {
-            for i in 0..self.num_features {
-                gamma_data.push(h[&[b, i]]);
-                beta_data.push(h[&[b, i + self.num_features]]);
-            }
-        }
-
-        let gamma = Tensor::from_data(gamma_data, vec![batch, self.num_features, 1]);
-        let beta = Tensor::from_data(beta_data, vec![batch, self.num_features, 1]);
-
-        // Apply normalization
-        let normalized = self.norm.forward(x);
-
-        // Apply style conditioning
-        let shape = normalized.shape();
-        let (batch, channels, length) = (shape[0], shape[1], shape[2]);
+        // Input x: (B, C, L)
+        let x_shape = x.shape();
         assert_eq!(
-            channels,
-            self.num_features,
-            "AdaIN1d: input channel count {} does not match num_features {}",
-            channels,
-            self.num_features
+            x_shape.len(),
+            3,
+            "AdaIN1d: input x must be 3D [batch, channels, length], got {:?}",
+            x_shape
         );
-        let mut output_data = Vec::with_capacity(batch * channels * length);
+        let (batch, channels, length) = (x_shape[0], x_shape[1], x_shape[2]);
+        assert_eq!(
+            channels, self.num_features,
+            "AdaIN1d: input channel count {} does not match num_features {}",
+            channels, self.num_features
+        );
+        assert_eq!(
+            h_shape[0], batch,
+            "AdaIN1d: style batch {} does not match input batch {}",
+            h_shape[0], batch
+        );
 
-        // Apply style directly: scale by gamma and shift by beta
+        let x_data = x.data();
+        let eps = self.norm.eps;
+        let len_f = length as f32;
+        let inv_len = 1.0f32 / len_f;
+
+        let mut out = vec![0.0f32; batch * channels * length];
+
         for b in 0..batch {
-            for c in 0..channels {
-                for l in 0..length {
-                    let normalized_val = normalized[&[b, c, l]];
-                    let gamma_val = gamma[&[b, c, 0]];
-                    let beta_val = beta[&[b, c, 0]];
+            let b_off = b * channels * length;
+            let h_row = &h_data[b * h_row_stride..(b + 1) * h_row_stride];
 
-                    output_data.push((1.0 + gamma_val) * normalized_val + beta_val);
+            for c in 0..channels {
+                let gamma = h_row[c];
+                let beta = h_row[c + channels];
+
+                let start = b_off + c * length;
+                let chan = &x_data[start..start + length];
+
+                // Pass 1: sum → mean
+                let mut sum = 0.0f32;
+                for &v in chan {
+                    sum += v;
+                }
+                let mean = sum * inv_len;
+
+                // Pass 2: sq_sum → variance → inv_std
+                let mut sq_sum = 0.0f32;
+                for &v in chan {
+                    let d = v - mean;
+                    sq_sum += d * d;
+                }
+                let var = sq_sum * inv_len;
+                let inv_std = 1.0f32 / (var + eps).sqrt();
+
+                // Pass 3: fused normalize + affine.
+                //   y = (1 + gamma) * ((x - mean) * inv_std) + beta
+                //     = scale * x + offset
+                // where scale  = (1 + gamma) * inv_std
+                //       offset = beta - mean * scale
+                let scale = (1.0 + gamma) * inv_std;
+                let offset = beta - mean * scale;
+
+                let out_chan = &mut out[start..start + length];
+                for (dst, &v) in out_chan.iter_mut().zip(chan.iter()) {
+                    *dst = v * scale + offset;
                 }
             }
         }
 
-        Tensor::from_data(output_data, shape.to_vec())
+        Tensor::from_data(out, x_shape.to_vec())
     }
 }
 

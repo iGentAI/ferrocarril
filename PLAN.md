@@ -1,18 +1,43 @@
 # Ferrocarril Review and Plan — April 2026
 
-> **Phase 3 numerical correctness is COMPLETE** (end of session, April 2026).
-> The Rust Kokoro-82M port now matches the Python reference to f32 precision
-> across every transformer component (BERT / TextEncoder / DurationEncoder /
-> ProsodyPredictor / Decoder) and within ~1 % global RMS + 0.99 envelope
-> correlation on the final generator audio. `cargo test --release --features
-> weights` runs clean at 22 passed / 0 failed / 0 ignored. The `ferrocarril
-> infer` CLI produces intelligible 24 kHz audio from real text via G2P. For
-> the tactical summary of what shipped, the test matrix, the sandbox setup
-> and the suggested Phase 4 (cleanup) and Phase 5 (WASM) next steps, read
-> **`HANDOFF.md`** — it is the authoritative "what's done and what's next"
-> document. The rest of this file is retained as historical context
-> (especially §3 "Is Kokoro Still the Right Target?" and the phased
-> roadmap).
+> **Phases 1–5 are COMPLETE, Phase 6 performance optimization is in
+> progress** (updated April 7 2026 afternoon session).
+>
+> **What's done:**
+> - **Phase 1** (consolidate + compile), **Phase 2** (canonicalize
+>   layout + clean slate docs), and **Phase 3** (numerical correctness
+>   per component) completed end of April 6 2026. The Rust Kokoro-82M
+>   port matches the Python reference to f32 precision across every
+>   transformer component (BERT / TextEncoder / DurationEncoder /
+>   ProsodyPredictor / Decoder) and within ~1 % global RMS + 0.99
+>   envelope correlation on the final generator audio.
+> - **Phase 4** (production cleanup: println noise stripped, dead-code
+>   warnings eliminated, module-level allow lists for documentation
+>   fields) and **Phase 5** (WebAssembly: `wasm32-unknown-unknown`
+>   compiles clean, `ferrocarril-wasm` crate exposes the inference
+>   pipeline via `wasm-bindgen`, bundled browser demo verified in
+>   Chromium) completed in a follow-up session.
+> - **Phase 6** (performance optimization) is currently in progress.
+>   Native inference for the canonical "Hi" input has dropped from
+>   ~258 s to **~2.0 s wall** (a ~130× speedup). The `matmul_f32`
+>   kernel now runs at ~76 GFLOPS on the dominant Generator shape
+>   (93 % of the 80 GFLOPS 2-FMA-port peak on the sandbox Xeon
+>   Platinum 8175M). Still ~2× from real-time.
+>
+> **`cargo test --release --features weights` runs 24 passed / 0
+> failed / 0 ignored.** The `ferrocarril infer` CLI produces
+> intelligible 24 kHz audio from real text via G2P.
+>
+> **For the current state and next steps, read:**
+> - **`HANDOFF.md`** — authoritative "what's done and what's next"
+>   document. Covers Phases 1-5 tactical summary, test matrix, sandbox
+>   setup, API surface, and a §5 pointer into Phase 6.
+> - **`PHASE6_STATUS.md`** — Phase 6 performance optimization log:
+>   full progression from 258 s to 2 s, commit trail, current profile
+>   breakdown, reproduction commands, and remaining opportunities.
+>
+> The rest of this file is retained as historical context (especially
+> §3 "Is Kokoro Still the Right Target?" and the phased roadmap).
 
 ---
 

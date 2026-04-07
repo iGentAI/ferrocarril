@@ -1,0 +1,17 @@
+# Per-target Rust compiler flags.
+#
+# `target-cpu=native` lets LLVM emit the full instruction set of the
+# host CPU (AVX-512 on the sandbox's Xeon Platinum 8175M, AVX2/FMA on
+# older hosts). This matters for the direct-slice inner loops in the
+# hot-path kernels (`ops::matmul_f32`, `ops::linear_f32`, and the
+# `Conv1d` / `ConvTranspose1d` fast paths that call them) which the
+# compiler can only vectorise fully when it knows the target CPU
+# width. The default stable-channel `x86_64-unknown-linux-gnu` target
+# only enables SSE2, which limits the matmul hot loop to 4-wide f32
+# lanes.
+#
+# Scoped to the native x86_64 target only — the wasm32 build has its
+# own SIMD story (via `target-feature=+simd128`) and should not be
+# affected by this file.
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-C", "target-cpu=native"]

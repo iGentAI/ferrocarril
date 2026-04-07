@@ -8,6 +8,13 @@ ferrocarril-core = { path = "../ferrocarril-core" }
 ferrocarril-dsp = { path = "../ferrocarril-dsp" }
 rand = "0.8.5"
 
+# `rand::thread_rng()` pulls `getrandom` which, on wasm32-unknown-unknown,
+# refuses to compile unless the `js` feature is explicitly enabled (it uses
+# web crypto for entropy). This target-conditional pin forces the feature
+# only on wasm builds, leaving native builds untouched.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.2", features = ["js"] }
+
 [features]
 default = ["weights"]
 weights = []
