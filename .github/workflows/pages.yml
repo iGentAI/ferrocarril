@@ -65,6 +65,7 @@ jobs:
 
       - name: Assemble Pages site
         env:
+          GH_TOKEN: ${{ github.token }}
           FERROCARRIL_WEIGHTS_URL: ${{ vars.FERROCARRIL_WEIGHTS_URL }}
           FERROCARRIL_WEIGHTS_LAYOUT: ${{ vars.FERROCARRIL_WEIGHTS_LAYOUT }}
         run: |
@@ -76,37 +77,57 @@ jobs:
           cp ferrocarril-wasm/demo/main.js    "$SITE_DIR/main.js"
           cp -r ferrocarril-wasm/demo/pkg     "$SITE_DIR/pkg"
 
-          # Default weights URL: the GitHub Release asset directory
-          # produced by release-weights.yml on tag `latest-weights`.
-          # Override via the `FERROCARRIL_WEIGHTS_URL` repo variable
-          # to point at Hugging Face / Cloudflare R2 / a private CDN
-          # instead.
-          DEFAULT_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/latest-weights/"
-          WEIGHTS_URL="${FERROCARRIL_WEIGHTS_URL:-$DEFAULT_URL}"
-
-          # Layout auto-detection:
-          #   * Explicit override via FERROCARRIL_WEIGHTS_LAYOUT wins.
-          #   * Otherwise, if the URL contains "/releases/download/"
-          #     anywhere (i.e. it's a GitHub Release asset endpoint),
-          #     use `tar` — the release-weights.yml workflow uploads a
-          #     single weights.tar asset there, which main.js streams
-          #     down and parses inline with a USTAR reader. GH Release
-          #     asset names can't contain `/` and GH's 500/hour
-          #     content-creation rate limit makes per-file uploads
-          #     infeasible at 600+ files, so tar is the only sensible
-          #     release-hosted option.
-          #   * Any other host is assumed to support nested directory
-          #     paths, which covers local serve.py development, Hugging
-          #     Face Hub, Cloudflare R2, S3, and similar.
-          # We use `grep -q` rather than a bash glob here because it's
-          # unambiguously a substring test and is obvious to any
-          # reviewer — no bash-pattern-semantics debate.
-          if [[ -n "${FERROCARRIL_WEIGHTS_LAYOUT:-}" ]]; then
-              WEIGHTS_LAYOUT="$FERROCARRIL_WEIGHTS_LAYOUT"
-          elif printf '%s' "$WEIGHTS_URL" | grep -q '/releases/download/'; then
+          # Default hosting strategy: download the weights.tar produced
+          # by the release-weights workflow into the Pages artifact
+          # itself, so visitors fetch it same-origin from the Pages CDN.
+          #
+          # Why not fetch cross-origin from the GH Release directly?
+          # `https://github.com/<repo>/releases/download/<tag>/weights.tar`
+          # is a 302 redirect to `release-assets.githubusercontent.com`
+          # and neither hop sends `Access-Control-Allow-Origin`. A
+          # browser fetch from `https://<owner>.github.io` is therefore
+          # blocked by CORS before the redirect is even followed. The
+          # cleanest fix is to pull the tar into the Pages artifact and
+          # serve it from the same origin as the HTML/JS.
+          #
+          # Cost: ~340 MB added to the Pages artifact per deploy; Pages
+          # soft limits are 1 GB site / 100 GB bandwidth per month, so
+          # this accommodates ~290 cold visitors/month before tripping
+          # the bandwidth cap. Users who want a larger audience can set
+          # the FERROCARRIL_WEIGHTS_URL repo variable to an external
+          # CORS-enabled host (Hugging Face Hub, Cloudflare R2, ...) to
+          # bypass this step entirely.
+          if [[ -z "${FERROCARRIL_WEIGHTS_URL:-}" ]]; then
+              WEIGHTS_URL="./"
               WEIGHTS_LAYOUT="tar"
+              echo "Default hosting: same-origin Pages artifact."
+
+              if gh release view latest-weights \
+                      --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+                  echo "Downloading weights.tar from latest-weights release..."
+                  gh release download latest-weights \
+                      --repo "$GITHUB_REPOSITORY" \
+                      --pattern weights.tar \
+                      --dir "$SITE_DIR"
+                  ls -lh "$SITE_DIR/weights.tar"
+              else
+                  echo ""
+                  echo "WARNING: no 'latest-weights' release found in $GITHUB_REPOSITORY."
+                  echo "Pages will deploy without weights.tar; the demo Load button"
+                  echo "will 404 on weights.tar until you dispatch the"
+                  echo "'Publish weight blobs to GH Release' workflow."
+                  echo ""
+              fi
           else
-              WEIGHTS_LAYOUT="nested"
+              WEIGHTS_URL="$FERROCARRIL_WEIGHTS_URL"
+              if [[ -n "${FERROCARRIL_WEIGHTS_LAYOUT:-}" ]]; then
+                  WEIGHTS_LAYOUT="$FERROCARRIL_WEIGHTS_LAYOUT"
+              elif printf '%s' "$WEIGHTS_URL" | grep -q '/releases/download/'; then
+                  WEIGHTS_LAYOUT="tar"
+              else
+                  WEIGHTS_LAYOUT="nested"
+              fi
+              echo "External hosting: $WEIGHTS_URL (layout=$WEIGHTS_LAYOUT)"
           fi
 
           echo "=============================================="
@@ -152,7 +173,8 @@ jobs:
           # the artefact.
           touch "$SITE_DIR/.nojekyll"
 
-          ls -lR "$SITE_DIR"
+          du -sh "$SITE_DIR"
+          ls -l "$SITE_DIR"
 
       - name: Setup Pages
         uses: actions/configure-pages@v5
