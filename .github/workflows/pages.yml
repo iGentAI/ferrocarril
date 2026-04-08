@@ -58,12 +58,6 @@ jobs:
           cargo install wasm-bindgen-cli --version 0.2.100 --locked
           wasm-bindgen --version
 
-      - name: Install binaryen (wasm-opt)
-        run: |
-          sudo apt-get update -y
-          sudo apt-get install -y binaryen
-          wasm-opt --version
-
       - name: Build ferrocarril-wasm demo
         run: |
           chmod +x ferrocarril-wasm/demo/build.sh
