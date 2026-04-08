@@ -1,0 +1,167 @@
+name: Deploy demo to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "ferrocarril-wasm/**"
+      - "ferrocarril-core/**"
+      - "ferrocarril-nn/**"
+      - "ferrocarril-dsp/**"
+      - "phonesis/**"
+      - "src/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/pages.yml"
+  workflow_dispatch:
+
+# Allow one concurrent deployment; cancel older runs in favour of newer ones.
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable + wasm32 target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache cargo registry and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: pages-wasm-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            pages-wasm-${{ runner.os }}-
+
+      - name: Install wasm-bindgen-cli (pinned to crate dep version)
+        run: |
+          set -e
+          # Must match the version pinned in ferrocarril-wasm/Cargo.toml.
+          cargo install wasm-bindgen-cli --version 0.2.100 --locked
+          wasm-bindgen --version
+
+      - name: Install binaryen (wasm-opt)
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y binaryen
+          wasm-opt --version
+
+      - name: Build ferrocarril-wasm demo
+        run: |
+          chmod +x ferrocarril-wasm/demo/build.sh
+          ferrocarril-wasm/demo/build.sh
+
+      - name: Assemble Pages site
+        env:
+          FERROCARRIL_WEIGHTS_URL: ${{ vars.FERROCARRIL_WEIGHTS_URL }}
+          FERROCARRIL_WEIGHTS_LAYOUT: ${{ vars.FERROCARRIL_WEIGHTS_LAYOUT }}
+        run: |
+          set -e
+          SITE_DIR=site
+          rm -rf "$SITE_DIR"
+          mkdir -p "$SITE_DIR"
+          cp ferrocarril-wasm/demo/index.html "$SITE_DIR/index.html"
+          cp ferrocarril-wasm/demo/main.js    "$SITE_DIR/main.js"
+          cp -r ferrocarril-wasm/demo/pkg     "$SITE_DIR/pkg"
+
+          # Default weights URL: the GitHub Release asset directory
+          # produced by release-weights.yml on tag `latest-weights`.
+          # Override via the `FERROCARRIL_WEIGHTS_URL` repo variable
+          # to point at Hugging Face / Cloudflare R2 / a private CDN
+          # instead.
+          DEFAULT_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/latest-weights/"
+          WEIGHTS_URL="${FERROCARRIL_WEIGHTS_URL:-$DEFAULT_URL}"
+
+          # Layout auto-detection:
+          #   * Explicit override via FERROCARRIL_WEIGHTS_LAYOUT wins.
+          #   * Otherwise, if the URL contains "/releases/download/"
+          #     anywhere (i.e. it's a GitHub Release asset endpoint),
+          #     use `flat` — GH Release asset names cannot contain
+          #     `/`, so release-weights.yml flattens them and main.js
+          #     has to un-flatten at fetch time.
+          #   * Any other host is assumed to support nested paths.
+          # We use `grep -q` rather than a bash glob here because it's
+          # unambiguously a substring test and is obvious to any
+          # reviewer — no bash-pattern-semantics debate.
+          if [[ -n "${FERROCARRIL_WEIGHTS_LAYOUT:-}" ]]; then
+              WEIGHTS_LAYOUT="$FERROCARRIL_WEIGHTS_LAYOUT"
+          elif printf '%s' "$WEIGHTS_URL" | grep -q '/releases/download/'; then
+              WEIGHTS_LAYOUT="flat"
+          else
+              WEIGHTS_LAYOUT="nested"
+          fi
+
+          echo "=============================================="
+          echo " Ferrocarril Pages deploy"
+          echo " Weights URL    : $WEIGHTS_URL"
+          echo " Weights layout : $WEIGHTS_LAYOUT"
+          echo "=============================================="
+
+          # Substitute the two meta tags. Using python so we don't
+          # have to worry about sed regex escaping of slashes or
+          # ampersands in URLs.
+          python3 - "$SITE_DIR/index.html" "$WEIGHTS_URL" "$WEIGHTS_LAYOUT" <<'PY'
+          import sys, re
+          path, url, layout = sys.argv[1], sys.argv[2], sys.argv[3]
+          with open(path, "r", encoding="utf-8") as f:
+              html = f.read()
+
+          def replace_meta(html, name, value):
+              pattern = (
+                  r'(<meta[^>]*name="'
+                  + re.escape(name)
+                  + r'"[^>]*content=")[^"]*(")'
+              )
+              new_html, count = re.subn(
+                  pattern,
+                  lambda m: m.group(1) + value + m.group(2),
+                  html,
+                  count=1,
+              )
+              if count == 0:
+                  raise SystemExit(f"meta tag '{name}' not found in {path}")
+              return new_html
+
+          html = replace_meta(html, "ferrocarril-weights-url", url)
+          html = replace_meta(html, "ferrocarril-weights-layout", layout)
+
+          with open(path, "w", encoding="utf-8") as f:
+              f.write(html)
+          print(f"Wrote weights URL '{url}' and layout '{layout}' into {path}")
+          PY
+
+          # A plain .nojekyll so GH Pages doesn't try to run Jekyll on
+          # the artefact.
+          touch "$SITE_DIR/.nojekyll"
+
+          ls -lR "$SITE_DIR"
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+      - name: Deploy to GitHub Pages
+        id: deploy
+        uses: actions/deploy-pages@v4

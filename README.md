@@ -23,7 +23,35 @@ model (StyleTTS2 + iSTFTNet, ~82M parameters, Apache-2.0).
   Sapphire Rapids; AVX-512 matmul peaks at ~76 GFLOPS per core.
 - **WebAssembly**: all four library crates compile to
   `wasm32-unknown-unknown`; `ferrocarril-wasm` exposes the inference
-  pipeline through `wasm-bindgen` with a working browser demo.
+  pipeline through `wasm-bindgen` with a working browser demo that
+  runs at ~2.3× native AVX-512 single-thread via a hand-written
+  `core::arch::wasm32::v128` matmul kernel. The full English→audio
+  pipeline including phonesis G2P fits in a ~1.1 MB gzipped wasm
+  module. See [`ferrocarril-wasm/`](ferrocarril-wasm/) for the
+  crate and [`ferrocarril-wasm/demo/`](ferrocarril-wasm/demo/) for
+  the demo page.
+
+## Try it in your browser
+
+A full working demo runs entirely client-side — no server inference,
+no ONNX Runtime, no API keys — via the `ferrocarril-wasm` crate and a
+small `wasm-bindgen` glue module. Type English text, pick a voice,
+hear it.
+
+- **Live**: deployed to GitHub Pages by
+  [`.github/workflows/pages.yml`](.github/workflows/pages.yml) on
+  every push to `main`. The weight blobs are fetched from a sibling
+  GitHub Release that
+  [`.github/workflows/release-weights.yml`](.github/workflows/release-weights.yml)
+  publishes on tag dispatch.
+- **Local**: run `./ferrocarril-wasm/demo/build.sh` to build the
+  wasm module, then `python3 ferrocarril-wasm/demo/serve.py` to
+  serve the demo on http://localhost:8080/ (requires a populated
+  `ferrocarril_weights/` directory from `weight_converter.py`).
+
+First load downloads ~340 MB of model weights into IndexedDB and
+takes a few seconds per short sentence to synthesise once loaded.
+Returning visitors skip the cold download.
 
 ## Repo Layout
 

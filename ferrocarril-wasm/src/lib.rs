@@ -11,9 +11,18 @@
 //!    IndexedDB cache, embedded static asset, etc.).
 //!
 //! 2. Calling [`WasmFerroModelBuilder::build`] produces a
-//!    [`WasmFerroModel`] which in turn exposes a `synthesize_ipa`
-//!    method that runs the full TTS inference pipeline and returns a
-//!    `Float32Array` of 24 kHz mono PCM samples.
+//!    [`WasmFerroModel`] which exposes two synthesis entry points:
+//!    [`WasmFerroModel::synthesize_text`] (the primary one, takes
+//!    English text and runs the full pipeline including G2P) and
+//!    [`WasmFerroModel::synthesize_ipa`] (takes pre-converted IPA
+//!    phonemes, useful for debugging and golden-fixture replays).
+//!    Both return a `Float32Array` of 24 kHz mono PCM samples.
+//!
+//! Grapheme-to-phoneme conversion is handled entirely inside this
+//! wasm module via the in-tree `phonesis` library, which embeds the
+//! full CMU Pronouncing Dictionary (~50 000 English words) plus a
+//! rule-based fallback at compile time. No separate G2P model needs
+//! to be loaded on the JavaScript side.
 //!
 //! ```javascript
 //! import init, { WasmFerroModelBuilder } from "./ferrocarril_wasm.js";
@@ -32,12 +41,12 @@
 //! }
 //! const model = builder.build();
 //!
-//! const audio = model.synthesize_ipa("hɛlqʊ", voicePackBytes, 1.0);
-//! ```
+//! // Primary path: plain English text in, 24 kHz PCM out.
+//! const audio = model.synthesize_text("Hello, world!", voicePackBytes, 1.0);
 //!
-//! The IPA phoneme string must be produced on the JavaScript side
-//! (using the bundled Phonesis WASM build or any other G2P pipeline);
-//! this crate does not perform grapheme-to-phoneme conversion itself.
+//! // Advanced path: pre-converted IPA, skips G2P.
+//! const audio2 = model.synthesize_ipa("hɛlqʊ", voicePackBytes, 1.0);
+//! ```
 
 use std::collections::HashMap;
 
@@ -50,6 +59,21 @@ use ferrocarril::{
     MapBlobProvider,
     Tensor,
 };
+
+#[wasm_bindgen]
+extern "C" {
+    #[wasm_bindgen(js_namespace = console, js_name = error)]
+    fn console_error(msg: &str);
+}
+
+fn panic_hook(info: &std::panic::PanicHookInfo) {
+    console_error(&info.to_string());
+}
+
+#[wasm_bindgen(start)]
+pub fn __ferrocarril_wasm_init() {
+    std::panic::set_hook(Box::new(panic_hook));
+}
 
 /// Builder that accumulates JSON metadata plus tensor/voice blob bytes
 /// before constructing a [`WasmFerroModel`].
@@ -135,10 +159,58 @@ pub struct WasmFerroModel {
     inner: FerroModel,
 }
 
+/// Decode a raw voice-pack byte buffer into a `Tensor<f32>` with the
+/// correct shape for `FerroModel`. Accepts either the full Kokoro
+/// voice pack (`[510, 256]` = 130560 f32) or a pre-indexed row
+/// (`[1, 256]` = 256 f32).
+fn decode_voice_pack(voice_pack: &[u8]) -> Result<Tensor<f32>, JsValue> {
+    if voice_pack.len() % 4 != 0 {
+        return Err(JsValue::from_str(
+            "voice_pack byte length must be a multiple of 4 (f32 little-endian)",
+        ));
+    }
+    let num_floats = voice_pack.len() / 4;
+    let mut data = Vec::with_capacity(num_floats);
+    for i in 0..num_floats {
+        let start = i * 4;
+        data.push(f32::from_le_bytes([
+            voice_pack[start],
+            voice_pack[start + 1],
+            voice_pack[start + 2],
+            voice_pack[start + 3],
+        ]));
+    }
+
+    // Kokoro voice packs ship as [510, 1, 256]; after flattening
+    // they become 510 * 256 = 130560 floats. FerroModel also
+    // accepts a single pre-indexed row ([1, 256], 256 floats).
+    let (rows, cols) = match num_floats {
+        130_560 => (510usize, 256usize),
+        256 => (1usize, 256usize),
+        _ => {
+            return Err(JsValue::from_str(&format!(
+                "unexpected voice_pack float count {}; expected 130560 ([510, 256]) or 256 ([1, 256])",
+                num_floats
+            )));
+        }
+    };
+
+    Ok(Tensor::from_data(data, vec![rows, cols]))
+}
+
 #[wasm_bindgen]
 impl WasmFerroModel {
-    /// Synthesize audio from IPA phonemes and a raw voice-pack byte
+    /// Synthesize audio from English text and a raw voice-pack byte
     /// buffer. Returns a flat `Float32Array` of 24 kHz mono PCM.
+    ///
+    /// This is the primary entry point for ordinary in-browser use:
+    /// the caller passes plain text and the wasm module runs the full
+    /// pipeline, including grapheme-to-phoneme conversion via the
+    /// in-tree `phonesis` library (which embeds a ~50 000-word CMU
+    /// pronouncing dictionary plus rule-based fallback at compile
+    /// time). No separate G2P model needs to be loaded on the
+    /// JavaScript side — `ferrocarril_core::PhonesisG2P` is already
+    /// part of this wasm module.
     ///
     /// `voice_pack` is the raw little-endian f32 bytes of a Kokoro-82M
     /// voice pack. Two shapes are accepted:
@@ -149,44 +221,42 @@ impl WasmFerroModel {
     /// `speed` is the inverse duration scaling factor; `1.0` is the
     /// reference speed. Higher values speed up speech, lower values
     /// slow it down.
+    pub fn synthesize_text(
+        &self,
+        text: &str,
+        voice_pack: &[u8],
+        speed: f32,
+    ) -> Result<Vec<f32>, JsValue> {
+        let voice_tensor = decode_voice_pack(voice_pack)?;
+
+        let audio = self
+            .inner
+            .infer_with_voice(text, &voice_tensor, speed)
+            .map_err(|e| JsValue::from_str(&format!("synthesis error: {}", e)))?;
+
+        Ok(audio)
+    }
+
+    /// Synthesize audio from IPA phonemes and a raw voice-pack byte
+    /// buffer. Returns a flat `Float32Array` of 24 kHz mono PCM.
+    ///
+    /// This method bypasses grapheme-to-phoneme conversion and is
+    /// intended for callers that already have IPA (e.g. debugging,
+    /// golden-fixture replays, fine phoneme control). For ordinary
+    /// English input, use [`WasmFerroModel::synthesize_text`].
+    ///
+    /// `voice_pack` has the same shape contract as
+    /// [`WasmFerroModel::synthesize_text`].
+    ///
+    /// `speed` is the inverse duration scaling factor; `1.0` is the
+    /// reference speed.
     pub fn synthesize_ipa(
         &self,
         ipa_phonemes: &str,
         voice_pack: &[u8],
         speed: f32,
     ) -> Result<Vec<f32>, JsValue> {
-        if voice_pack.len() % 4 != 0 {
-            return Err(JsValue::from_str(
-                "voice_pack byte length must be a multiple of 4 (f32 little-endian)",
-            ));
-        }
-        let num_floats = voice_pack.len() / 4;
-        let mut data = Vec::with_capacity(num_floats);
-        for i in 0..num_floats {
-            let start = i * 4;
-            data.push(f32::from_le_bytes([
-                voice_pack[start],
-                voice_pack[start + 1],
-                voice_pack[start + 2],
-                voice_pack[start + 3],
-            ]));
-        }
-
-        // Kokoro voice packs ship as [510, 1, 256]; after flattening
-        // they become 510 * 256 = 130560 floats. FerroModel also
-        // accepts a single pre-indexed row ([1, 256], 256 floats).
-        let (rows, cols) = match num_floats {
-            130_560 => (510usize, 256usize),
-            256 => (1usize, 256usize),
-            _ => {
-                return Err(JsValue::from_str(&format!(
-                    "unexpected voice_pack float count {}; expected 130560 ([510, 256]) or 256 ([1, 256])",
-                    num_floats
-                )));
-            }
-        };
-
-        let voice_tensor = Tensor::from_data(data, vec![rows, cols]);
+        let voice_tensor = decode_voice_pack(voice_pack)?;
 
         let audio = self
             .inner

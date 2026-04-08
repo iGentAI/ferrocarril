@@ -21,8 +21,12 @@ echo ">> Target pkg dir: ${PKG_DIR}"
 
 cd "${WORKSPACE_ROOT}"
 
-echo ">> Stage 1: cargo build --release --target wasm32-unknown-unknown --lib -p ferrocarril-wasm"
-cargo build \
+echo ">> Stage 1: cargo build --release --target wasm32-unknown-unknown --lib -p ferrocarril-wasm (+simd128)"
+# `+simd128` enables the hand-written wasm SIMD matmul hot path in
+# ferrocarril-core/src/ops/matmul.rs. Without this flag the build
+# falls through to a scalar path that is ~2× slower on inference.
+RUSTFLAGS="-C target-feature=+simd128" \
+    cargo build \
     --release \
     --target wasm32-unknown-unknown \
     --lib \
@@ -45,6 +49,7 @@ wasm-bindgen \
 if command -v wasm-opt >/dev/null 2>&1; then
     echo ">> Stage 3: wasm-opt -Oz (optional)"
     wasm-opt -Oz \
+        --enable-simd \
         -o "${PKG_DIR}/ferrocarril_wasm_bg.wasm" \
         "${PKG_DIR}/ferrocarril_wasm_bg.wasm"
 else
@@ -52,5 +57,11 @@ else
 fi
 
 ls -lh "${PKG_DIR}"
+WASM_OUT="${PKG_DIR}/ferrocarril_wasm_bg.wasm"
+if [[ -f "${WASM_OUT}" ]] && command -v gzip >/dev/null 2>&1; then
+    RAW=$(stat -c%s "${WASM_OUT}" 2>/dev/null || stat -f%z "${WASM_OUT}")
+    GZ=$(gzip -c "${WASM_OUT}" | wc -c)
+    echo ">> Final wasm size: ${RAW} bytes raw, ${GZ} bytes gzipped"
+fi
 echo ">> Done. Serve this directory (or its parent) with a plain HTTP server"
 echo "   and open demo/index.html in a modern browser."

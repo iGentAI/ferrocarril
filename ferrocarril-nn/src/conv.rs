@@ -16,6 +16,24 @@ use ferrocarril_core::weights_binary::BinaryWeightLoader;
 #[cfg(feature = "weights")]
 use ferrocarril_core::LoadWeightsBinary;
 
+#[cfg(target_arch = "wasm32")]
+mod _time_shim {
+    #[derive(Copy, Clone)]
+    pub struct Instant;
+    impl Instant {
+        pub fn now() -> Self { Instant }
+        pub fn elapsed(&self) -> std::time::Duration { std::time::Duration::ZERO }
+    }
+    impl std::ops::Sub for Instant {
+        type Output = std::time::Duration;
+        fn sub(self, _other: Self) -> std::time::Duration { std::time::Duration::ZERO }
+    }
+}
+#[cfg(target_arch = "wasm32")]
+use _time_shim::Instant;
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Instant;
+
 thread_local! {
     /// Per-thread im2col scratch buffer reused across `Conv1d::conv1d_b1_g1_im2col`
     /// calls.
@@ -259,7 +277,7 @@ impl Conv1d {
         let profile = std::env::var("FERRO_PROFILE").is_ok();
 
         let t_alloc_start = if profile {
-            Some(std::time::Instant::now())
+            Some(Instant::now())
         } else {
             None
         };
@@ -281,7 +299,7 @@ impl Conv1d {
             let im2col = &mut buf[..im2col_size];
 
             let t_im2col = if profile {
-                Some(std::time::Instant::now())
+                Some(Instant::now())
             } else {
                 None
             };
@@ -303,7 +321,7 @@ impl Conv1d {
             }
 
             let t_matmul = if profile {
-                Some(std::time::Instant::now())
+                Some(Instant::now())
             } else {
                 None
             };
@@ -323,7 +341,7 @@ impl Conv1d {
         });
 
         let t_bias_start = if profile {
-            Some(std::time::Instant::now())
+            Some(Instant::now())
         } else {
             None
         };

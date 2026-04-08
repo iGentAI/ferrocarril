@@ -3,106 +3,238 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Ferrocarril Wasm Demo</title>
+<title>Ferrocarril — in-browser Kokoro-82M TTS</title>
+<!--
+    The Pages deploy workflow substitutes the `content` attribute of
+    this meta tag with the URL prefix under which the weight blobs
+    live (typically a GitHub Release "download/<tag>/" URL). The
+    empty default is used when serving the demo locally via
+    demo/serve.py, which routes `/weights/` to a sibling
+    ferrocarril_weights directory.
+-->
+<meta name="ferrocarril-weights-url" content="">
+<!--
+    Asset path layout for the weights host. One of:
+      - `nested` (default): paths preserved, e.g.
+        `{base}/model/metadata.json`. Used by serve.py, Hugging
+        Face Hub, Cloudflare R2, S3, and any host that supports
+        directory paths in URLs.
+      - `flat`: path separators replaced with `__`, e.g.
+        `{base}/model__metadata.json`. Used by GitHub Releases
+        because release asset names cannot contain `/`.
+    The Pages deploy workflow substitutes this at build time.
+-->
+<meta name="ferrocarril-weights-layout" content="nested">
 <style>
+    :root {
+        --bg: #0f0f14;
+        --panel: #1a1a24;
+        --panel-border: #2a2a36;
+        --fg: #d8d8e0;
+        --fg-dim: #8b8ba0;
+        --fg-faint: #6a6a80;
+        --accent: #3563c6;
+        --accent-hover: #4775d8;
+        --ok: #6fc26f;
+        --warn: #e6b96a;
+        --err: #e27373;
+        --link: #79a6ff;
+    }
     body {
         font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
-        max-width: 820px;
+        max-width: 840px;
         margin: 40px auto;
         padding: 0 20px;
-        background: #0f0f14;
-        color: #d8d8e0;
-        line-height: 1.5;
+        background: var(--bg);
+        color: var(--fg);
+        line-height: 1.55;
     }
     h1, h2 { color: #ffffff; }
-    h1 { font-size: 1.7rem; margin-bottom: 0.2rem; }
-    h2 { font-size: 1.15rem; margin-top: 1.8rem; border-bottom: 1px solid #333; padding-bottom: 0.3rem; }
-    .sub { color: #8b8ba0; margin-top: 0; }
-    code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    h1 { font-size: 1.8rem; margin-bottom: 0.2rem; }
+    h2 {
+        font-size: 1.15rem;
+        margin-top: 2rem;
+        border-bottom: 1px solid var(--panel-border);
+        padding-bottom: 0.3rem;
+    }
+    .sub { color: var(--fg-dim); margin-top: 0; }
+    code, pre {
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
     pre {
-        background: #1a1a24;
-        border: 1px solid #2a2a36;
+        background: var(--panel);
+        border: 1px solid var(--panel-border);
         padding: 10px 14px;
         border-radius: 6px;
         overflow-x: auto;
     }
     button {
-        background: #3563c6;
+        background: var(--accent);
         border: none;
         color: white;
-        padding: 9px 16px;
+        padding: 10px 18px;
         border-radius: 6px;
         font-size: 0.95rem;
         cursor: pointer;
+        transition: background 0.1s ease;
     }
-    button:hover:not([disabled]) { background: #4775d8; }
-    button[disabled] { background: #2a2a36; color: #666; cursor: not-allowed; }
-    input[type="text"] {
-        background: #1a1a24;
-        border: 1px solid #2a2a36;
-        color: #d8d8e0;
-        padding: 8px 12px;
+    button:hover:not([disabled]) { background: var(--accent-hover); }
+    button[disabled] {
+        background: var(--panel);
+        color: var(--fg-faint);
+        cursor: not-allowed;
+    }
+    input[type="text"], textarea, select {
+        background: var(--panel);
+        border: 1px solid var(--panel-border);
+        color: var(--fg);
+        padding: 9px 12px;
         border-radius: 6px;
         font-size: 0.95rem;
         width: 100%;
         box-sizing: border-box;
+        font-family: inherit;
     }
-    .row { display: flex; gap: 10px; align-items: center; margin: 10px 0; }
+    textarea { resize: vertical; min-height: 3em; }
+    label {
+        display: block;
+        color: var(--fg-dim);
+        font-size: 0.85rem;
+        margin-bottom: 4px;
+        margin-top: 12px;
+    }
+    .row { display: flex; gap: 10px; align-items: center; margin: 12px 0; }
+    .row > * { flex: 0 0 auto; }
+    .row > .grow { flex: 1 1 auto; }
     .status {
         font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
         white-space: pre-wrap;
-        background: #1a1a24;
-        border: 1px solid #2a2a36;
-        padding: 10px;
+        background: var(--panel);
+        border: 1px solid var(--panel-border);
+        padding: 10px 14px;
         border-radius: 6px;
         min-height: 2em;
         font-size: 0.88rem;
     }
-    .ok { color: #6fc26f; }
-    .err { color: #e27373; }
-    audio { width: 100%; margin-top: 10px; }
-    a { color: #79a6ff; }
+    .ok { color: var(--ok); }
+    .warn { color: var(--warn); }
+    .err { color: var(--err); }
+    audio { width: 100%; margin-top: 12px; }
+    a { color: var(--link); }
+    progress {
+        width: 100%;
+        height: 14px;
+        accent-color: var(--accent);
+    }
+    details {
+        margin: 12px 0;
+        border: 1px solid var(--panel-border);
+        border-radius: 6px;
+        padding: 8px 12px;
+        background: var(--panel);
+    }
+    details > summary {
+        cursor: pointer;
+        color: var(--fg-dim);
+        font-size: 0.88rem;
+    }
+    .disclaimer {
+        font-size: 0.85rem;
+        color: var(--fg-dim);
+        background: var(--panel);
+        border: 1px solid var(--panel-border);
+        border-left: 3px solid var(--warn);
+        border-radius: 6px;
+        padding: 10px 14px;
+    }
 </style>
 </head>
 <body>
-<h1>Ferrocarril Wasm Demo</h1>
+
+<h1>Ferrocarril</h1>
 <p class="sub">
-    Pure-Rust Kokoro-82M TTS running inside your browser via
-    <code>wasm-bindgen</code>. No ONNX Runtime, no server calls during
-    inference.
+    Pure-Rust port of <a href="https://huggingface.co/hexgrad/Kokoro-82M">Kokoro-82M</a>
+    running inside your browser via <code>wasm-bindgen</code>. No ONNX
+    Runtime, no server round-trips during inference. Grapheme-to-phoneme,
+    acoustic model, and vocoder all run in the same wasm module.
 </p>
 
-<h2>1. Smoke test: load the wasm module</h2>
-<p>
-    Initialises the wasm binary and constructs an empty
-    <code>WasmFerroModelBuilder</code> to confirm the bindings are
-    reachable. Does not fetch any weights.
+<div class="disclaimer">
+    <strong>Heads up:</strong> the first visit downloads ~340 MB of
+    model weights and takes tens of seconds. Subsequent visits are
+    cached in your browser's IndexedDB and should start much faster.
+    Inference itself takes roughly 4&times; wall time per second of
+    audio on a recent desktop browser; expect a few seconds per short
+    sentence.
+</div>
+
+<h2>1. Load model</h2>
+<p class="sub">
+    Fetches the config, metadata, and every tensor/voice blob
+    referenced by <code>metadata.json</code> and <code>voices.json</code>,
+    then wires them into a <code>FerroModel</code>. Progress is tracked
+    blob by blob.
+</p>
+<div class="row">
+    <button id="loadBtn">Load model</button>
+    <span id="loadStatusShort" class="sub"></span>
+</div>
+<progress id="loadProgress" max="1" value="0"></progress>
+<div id="loadStatus" class="status">(not started)</div>
+
+<h2>2. Synthesise</h2>
+<label for="textInput">English text</label>
+<textarea id="textInput" rows="3">The quick brown fox jumps over the lazy dog.</textarea>
+
+<div class="row">
+    <div style="flex: 1 1 auto;">
+        <label for="voiceSelect">Voice</label>
+        <select id="voiceSelect" disabled>
+            <option>Load model to populate voices…</option>
+        </select>
+    </div>
+    <div style="flex: 0 0 120px;">
+        <label for="speedInput">Speed</label>
+        <input id="speedInput" type="text" value="1.0">
+    </div>
+</div>
+
+<div class="row">
+    <button id="speakBtn" disabled>Synthesise</button>
+    <span id="speakStatusShort" class="sub"></span>
+</div>
+
+<details>
+    <summary>Advanced: feed pre-converted IPA directly (skips G2P)</summary>
+    <p class="sub">
+        Useful for debugging G2P output, reproducing golden fixtures,
+        or forcing specific phoneme sequences. Uses the same
+        Kokoro-82M vocabulary as <code>synthesize_ipa</code>. Leave
+        blank to use the English text above.
+    </p>
+    <label for="ipaInput">IPA</label>
+    <input id="ipaInput" type="text" value="" placeholder="e.g. hɛlqʊ">
+</details>
+
+<div id="speakStatus" class="status">(model not loaded)</div>
+<audio id="player" controls></audio>
+
+<h2>Diagnostic: module smoke test</h2>
+<p class="sub">
+    Loads the wasm module and constructs an empty builder without
+    fetching any weights. If this fails, the wasm build itself is
+    broken and nothing downstream will work.
 </p>
 <div class="row">
     <button id="smokeBtn">Run smoke test</button>
 </div>
 <div id="smokeStatus" class="status">(not run)</div>
 
-<h2>2. Full inference: fetch weights &amp; synthesise</h2>
-<p>
-    Loads the full 341 MB Kokoro weight pack from <code>./weights/</code>,
-    builds the model, and synthesises a short IPA utterance. The IPA
-    must match Kokoro's vocabulary (see
-    <code>kokoro/tokenizer.py</code> in the reference repo).
-</p>
-<div class="row">
-    <input id="ipaInput" type="text" value="hɛlqʊ" placeholder="IPA phonemes, e.g. hɛlqʊ">
-</div>
-<div class="row">
-    <button id="loadBtn">1. Load weights</button>
-    <button id="speakBtn" disabled>2. Synthesise</button>
-</div>
-<div id="fullStatus" class="status">(not run)</div>
-<audio id="player" controls></audio>
-
-<p style="margin-top: 2rem; color: #6a6a80; font-size: 0.85rem;">
+<p style="margin-top: 2.5rem; color: var(--fg-faint); font-size: 0.85rem;">
     Source: <a href="https://github.com/iGentAI/ferrocarril">iGentAI/ferrocarril</a>
-    &middot; Licence: Apache-2.0 (weights) / MIT (this crate)
+    &middot; Weights: Apache-2.0
+    (<a href="https://huggingface.co/hexgrad/Kokoro-82M">hexgrad/Kokoro-82M</a>)
+    &middot; Code: MIT
 </p>
 
 <script type="module" src="./main.js"></script>

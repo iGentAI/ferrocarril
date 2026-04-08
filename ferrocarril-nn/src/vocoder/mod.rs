@@ -31,6 +31,23 @@ use ferrocarril_core::weights_binary::BinaryWeightLoader;
 #[cfg(feature = "weights")]
 use ferrocarril_core::LoadWeightsBinary;
 
+#[cfg(target_arch = "wasm32")]
+mod _time_shim {
+    #[derive(Copy, Clone)]
+    pub struct Instant;
+    impl Instant {
+        pub fn now() -> Self { Instant }
+        pub fn elapsed(&self) -> std::time::Duration { std::time::Duration::ZERO }
+    }
+    impl std::ops::Sub for Instant {
+        type Output = std::time::Duration;
+        fn sub(self, _other: Self) -> std::time::Duration { std::time::Duration::ZERO }
+    }
+}
+#[cfg(target_arch = "wasm32")]
+use _time_shim::Instant;
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Instant;
 
 /// UpSample1d for conditional upsampling operations
 #[derive(Clone, Copy)]
@@ -480,12 +497,12 @@ impl Generator {
     #[allow(unused_assignments)]
     pub fn forward(&self, x: &Tensor<f32>, s: &Tensor<f32>, f0: &Tensor<f32>) -> Result<Tensor<f32>, FerroError> {
         let profile = std::env::var("FERRO_PROFILE").is_ok();
-        let t_start = std::time::Instant::now();
+        let t_start = Instant::now();
         let mut t_mark = t_start;
         macro_rules! gstage {
             ($name:expr) => {
                 if profile {
-                    let now = std::time::Instant::now();
+                    let now = Instant::now();
                     eprintln!(
                         "[profile]   gen {:<34} {:>9.3} ms",
                         $name,
@@ -775,7 +792,7 @@ impl Generator {
         gstage!("iSTFT inverse");
 
         if profile {
-            let total = (std::time::Instant::now() - t_start).as_secs_f64() * 1000.0;
+            let total = (Instant::now() - t_start).as_secs_f64() * 1000.0;
             eprintln!(
                 "[profile]   gen {:<34} {:>9.3} ms",
                 "TOTAL Generator::forward", total
@@ -870,12 +887,12 @@ impl Decoder {
         s: &Tensor<f32>,
     ) -> Result<Tensor<f32>, FerroError> {
         let profile = std::env::var("FERRO_PROFILE").is_ok();
-        let t_start = std::time::Instant::now();
+        let t_start = Instant::now();
         let mut t_mark = t_start;
         macro_rules! dstage {
             ($name:expr) => {
                 if profile {
-                    let now = std::time::Instant::now();
+                    let now = Instant::now();
                     eprintln!(
                         "[profile]  dec {:<34} {:>9.3} ms",
                         $name,
@@ -994,7 +1011,7 @@ impl Decoder {
         dstage!("generator.forward");
 
         if profile {
-            let total = (std::time::Instant::now() - t_start).as_secs_f64() * 1000.0;
+            let total = (Instant::now() - t_start).as_secs_f64() * 1000.0;
             eprintln!(
                 "[profile]  dec {:<34} {:>9.3} ms",
                 "TOTAL Decoder::forward", total
