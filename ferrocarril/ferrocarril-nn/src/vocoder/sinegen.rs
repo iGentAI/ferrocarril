@@ -2,6 +2,41 @@
 
 use ferrocarril_core::tensor::Tensor;
 use rand::Rng;
+use rand::SeedableRng;
+use rand::rngs::StdRng;
+
+/// Box-Muller transform: produces a single sample from the
+/// standard normal distribution `N(0, 1)` given a uniform RNG.
+///
+/// We use two independent `uniform(0, 1)` variates `u1` and `u2`
+/// and return `sqrt(-2 ln u1) * cos(2π u2)`. This matches the
+/// semantics of PyTorch's `torch.randn` / `torch.randn_like` which
+/// Python kokoro uses for the vocoder's noise branches. The
+/// previous implementation used `rng.gen::<f32>() * 2.0 - 1.0`
+/// (uniform on `[-1, 1]`) which has a fundamentally different
+/// distribution — same mean 0, but std 0.577 instead of 1.0,
+/// and no Gaussian tails. That mismatch showed up as an audible
+/// warble on the longer samples in broad-test sweeps.
+///
+/// `u1` is clamped to at least `1e-30` to avoid `ln(0) = -inf`
+/// on the (astronomically rare) event that the RNG returns exact
+/// 0.
+pub(super) fn gaussian_sample(rng: &mut impl Rng) -> f32 {
+    let u1: f32 = rng.gen::<f32>().max(1e-30);
+    let u2: f32 = rng.gen::<f32>();
+    (-2.0 * u1.ln()).sqrt() * (2.0 * std::f32::consts::PI * u2).cos()
+}
+
+/// Deterministic seed for the phase-initialization RNG in `f02sine`.
+/// Fixed so that identical inputs produce identical phase-init
+/// sequences across binary invocations — critical for reproducing
+/// synthesis output and debugging user-reported artifacts.
+const PHASE_INIT_SEED: u64 = 0xFE41_5117_E0E5_A41A;
+
+/// Deterministic seed for the noise RNG in `SineGen::forward`.
+/// Different from `PHASE_INIT_SEED` so the two streams are
+/// uncorrelated; same deterministic guarantees.
+const NOISE_SEED: u64 = 0xFE42_5117_E0E5_A41A;
 
 /// SineGen - Sinusoidal signal generator for neural source-filter model
 pub struct SineGen {
@@ -125,9 +160,12 @@ impl SineGen {
             }
         }
         
-        // Set initial phase with random value
+        // Set initial phase with random value drawn from a
+        // DETERMINISTICALLY-SEEDED PRNG so repeated runs of the
+        // binary produce identical phases for identical inputs.
+        // The uniform distribution matches Python's `torch.rand`.
         let mut rand_ini = vec![0.0; batch_size * self.dim];
-        let mut rng = rand::thread_rng();
+        let mut rng = StdRng::seed_from_u64(PHASE_INIT_SEED);
         for b in 0..batch_size {
             for d in 1..self.dim { // Skip first dimension (fundamental)
                 // Random value between 0 and 1
@@ -298,8 +336,14 @@ impl SineGen {
         // Generate UV signal
         let uv = self.f02uv(f0);
         
-        // Generate noise
-        let mut rng = rand::thread_rng();
+        // Generate noise. Deterministically-seeded RNG so repeated
+        // runs produce identical output, and Gaussian samples via
+        // Box-Muller to match Python's `torch.randn_like`. The
+        // previous implementation used `(rng.gen::<f32>() * 2.0 -
+        // 1.0)` (uniform on `[-1, 1]`), which has std 0.577
+        // instead of the Gaussian 1.0 and no tail behavior —
+        // audibly different from Python kokoro's noise.
+        let mut rng = StdRng::seed_from_u64(NOISE_SEED);
         let mut noise = vec![0.0; batch_size * time * self.dim];
         for b in 0..batch_size {
             for t in 0..time {
@@ -323,13 +367,14 @@ impl SineGen {
                         }
                     };
                     
-                    // Random noise with proper amplitude
+                    // Noise amplitude: small std for voiced, larger for unvoiced
                     let noise_amp = if uv_value > 0.0 {
                         self.noise_std
                     } else {
                         self.sine_amp / 3.0
                     };
-                    noise[b * time * self.dim + t * self.dim + d] = (rng.gen::<f32>() * 2.0 - 1.0) * noise_amp;
+                    noise[b * time * self.dim + t * self.dim + d] =
+                        gaussian_sample(&mut rng) * noise_amp;
                 }
             }
         }

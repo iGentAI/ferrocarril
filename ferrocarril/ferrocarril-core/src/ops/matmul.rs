@@ -9,16 +9,29 @@
 //!   paths use **3-level cache blocking** to keep the b panel
 //!   resident in L2 across the m row iterations. For matrices with
 //!   `m >= PARALLEL_THRESHOLD` they additionally split the m
-//!   dimension across two scoped threads, so a 2-vCPU host sees
-//!   close to a 2x speedup on the dominant Generator shapes.
+//!   dimension across **N scoped worker threads**, where `N` is
+//!   computed per-call by [`worker_count_for_shape`] —
+//!   `min(matmul_workers(), m / MR_MIN, total_work / MIN_WORK_PER_WORKER)`.
+//!   The `total_work` cap prevents small shapes like the Generator
+//!   `conv_post` (m=22) from paying scoped-thread spawn overhead
+//!   larger than the serial kernel's entire runtime. The host
+//!   parallelism cap defaults to `min(available_parallelism, 8)`
+//!   and is overridable via the `FERRO_MATMUL_THREADS` environment
+//!   variable. On a 2-vCPU/1-physical-core hyperthreaded host the
+//!   parallel path gives ~1.3-1.5× over serial on large shapes and
+//!   the work-threshold keeps small shapes on the serial fast
+//!   path. On an 8-physical-core host (e.g. a privileged sandbox
+//!   with 16 vCPUs) the parallel path scales much closer to N×
+//!   because each worker lands on a distinct physical core's FMA
+//!   ports.
 //!
 //! - [`linear_f32`] — fused `y = x @ w^T + bias` kernel where `w` is
 //!   stored in its **untransposed** PyTorch layout `[out_features,
 //!   in_features]`. On x86_64 with `avx512f`, dispatches to a
 //!   **4-way unrolled ZMM dot-product** kernel that breaks the fma
-//!   dependency chain across 4 independent accumulators so both SKX
-//!   FMA ports can dispatch at full rate. Falls back to a scalar
-//!   auto-vectorised triple loop on other hosts.
+//!   dependency chain across 4 independent accumulators so both
+//!   AVX-512 FMA ports can dispatch at full rate. Falls back to a
+//!   scalar auto-vectorised triple loop on other hosts.
 //!
 //! **Output buffer contract.** `matmul_f32` **accumulates** into the
 //! caller's `c` buffer — callers are responsible for zeroing it
@@ -29,23 +42,123 @@
 //! Stage 1 Generator convs, that means the L2 cache thrashes
 //! repeatedly. Blocking on `(j_block, k_block)` keeps a `KC × NC` b
 //! sub-panel in L2 across all `m` iterations of `i`, dramatically
-//! improving cache reuse. Tuned for the L2 cache size of this host's
-//! Xeon Platinum 8175M (1 MB per core) with `KC = NC = 256` (256 KB
-//! panel).
+//! improving cache reuse. Tuned for the L2 cache sizes seen on
+//! modern Intel server parts (Skylake-X / Ice Lake / Sapphire
+//! Rapids — 1-2 MB per physical core) with `KC = NC = 256`
+//! (256 KB packed b panel).
 //!
 //! **Parallelism rationale.** After cache blocking the matmul is
 //! still compute-bound at the available SIMD throughput, so adding
-//! more cores helps directly. Splitting the m dimension is
-//! row-disjoint in `c`, so the two halves don't interfere and the
-//! borrow-checker is happy.
+//! more workers helps directly when those workers run on distinct
+//! physical cores. Splitting the m dimension is row-disjoint in
+//! `c`, so workers don't interfere and the borrow-checker is happy.
+//! The `MIN_WORK_PER_WORKER` gate (32 Mops per worker) was
+//! calibrated empirically from the Generator's `conv_post` shape
+//! and prevents small-work shapes from paying spawn overhead
+//! larger than their serial runtime. The cap of `8` workers
+//! reflects the diminishing returns observed once the per-call
+//! `scope.spawn` overhead (~30-100 us × N workers × ~88 matmul
+//! calls per Generator forward) and the cumulative L2 footprint of
+//! the per-worker BLIS-packed b panels (256 KB each) start eating
+//! the win.
 
 use crate::tensor::Tensor;
 use std::cell::RefCell;
+use std::sync::OnceLock;
 
 /// Matrices with `m` strictly less than this fall through to the
-/// single-threaded path. Avoids paying ~10-50 μs of thread spawn
+/// single-threaded path. Avoids paying ~30-100 μs of thread spawn
 /// overhead on tiny matmuls (BERT Q/K/V projections at m=3-7, etc).
 const PARALLEL_THRESHOLD: usize = 16;
+
+/// Minimum rows per parallel worker. Equal to MR (the row block of
+/// the main 8×32 micro-kernel) so that every worker has at least
+/// one full main-kernel iteration. Workers with fewer than `MR_MIN`
+/// rows would fall through to the small-m path, which is slower per
+/// row and defeats the parallelism gain.
+const MR_MIN: usize = 8;
+
+/// Minimum total work (f32 multiply-add ops) a parallel worker must
+/// have before we spawn it. Below this, the scoped thread spawn
+/// overhead plus per-worker `PACKED_B` re-allocation (each spawned
+/// worker sees a fresh thread-local and pays the 256 KB alloc on
+/// first use) dominates any parallel speedup and the dispatcher
+/// loses to the serial path.
+///
+/// Calibrated empirically from the Generator's "medium" conv_post
+/// shape (m=22 n=3361 k=448, ~33 Mops total) on both the default
+/// Ice Lake sandbox and the 16-vCPU Sapphire Rapids privileged
+/// sandbox:
+///
+/// - Default Ice Lake: N=1 = 42 GFLOPS, N=2 = 11 GFLOPS (2-way loses 3.8×)
+/// - Multicore Sapphire Rapids: N=1 = 68 GFLOPS, N=2 = 32 GFLOPS (2-way loses 2.1×)
+///
+/// Setting the threshold at 32 Mops/worker keeps `medium` (33 Mops
+/// total → 1 worker) on the serial path while allowing `large`
+/// (~400 Mops) and `xl` (~600 Mops) to use the full worker count.
+/// This fixes a latent regression in the pre-existing hardcoded
+/// 2-way dispatcher that was never visible through the old bench
+/// suite (which only compared "blocked+SIMD" vs "scalar baseline"
+/// and never measured "serial vs 2-way" for these shapes).
+const MIN_WORK_PER_WORKER: usize = 32_000_000;
+
+/// Determine how many worker threads to use for the m-dimension
+/// split in the parallel matmul dispatchers. The result is cached
+/// on first call so the env-var lookup and `available_parallelism()`
+/// syscall only happen once per process.
+///
+/// **Override**: set the `FERRO_MATMUL_THREADS` environment variable
+/// to a positive integer to force a specific worker count. Useful
+/// for ablation studies (`FERRO_MATMUL_THREADS=1` disables the m
+/// split entirely) and for benchmarking thread-scaling curves.
+///
+/// **Default**: `min(available_parallelism, 8)`. The cap reflects
+/// the diminishing returns observed once the per-call `scope.spawn`
+/// overhead (~30-100 us × N workers × ~88 matmul calls per
+/// inference) and the cumulative L2 footprint of the per-worker
+/// packed b panels (256 KB each) start eating the win.
+fn matmul_workers() -> usize {
+    static WORKERS: OnceLock<usize> = OnceLock::new();
+    *WORKERS.get_or_init(|| {
+        if let Ok(s) = std::env::var("FERRO_MATMUL_THREADS") {
+            if let Ok(n) = s.parse::<usize>() {
+                if n >= 1 {
+                    return n;
+                }
+            }
+        }
+        std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(2)
+            .min(8)
+    })
+}
+
+/// Compute the number of worker threads for a matmul of the given
+/// shape. Applies three independent caps, then takes the minimum:
+///
+/// 1. `matmul_workers()` — the host's effective parallelism (at
+///    most 8, overridable via `FERRO_MATMUL_THREADS`).
+/// 2. `m / MR_MIN` — workers with fewer rows than the main 8×32
+///    micro-kernel's row block wouldn't even run the main kernel.
+/// 3. `total_work / MIN_WORK_PER_WORKER` — ensures each worker has
+///    enough flops to amortize its scoped-thread spawn + packed-b
+///    allocation overhead.
+///
+/// The final clamp with `.max(1)` guarantees at least one worker
+/// (the caller's own thread via the serial fallback if the result
+/// is 1).
+fn worker_count_for_shape(m: usize, n: usize, k: usize) -> usize {
+    let max_by_rows = (m / MR_MIN).max(1);
+    // saturating_mul to defend against `m * n * k` overflowing usize
+    // on 32-bit targets with very large (though unusual) shapes.
+    let total_work = m.saturating_mul(n).saturating_mul(k);
+    let max_by_work = (total_work / MIN_WORK_PER_WORKER).max(1);
+    matmul_workers()
+        .min(max_by_rows)
+        .min(max_by_work)
+        .max(1)
+}
 
 thread_local! {
     /// Per-thread packed b panel for the BLIS-style AVX-512 matmul
@@ -62,8 +175,12 @@ thread_local! {
     /// ```
     ///
     /// Buffer grows monotonically to `KC * NC = 64K` floats (256 KB)
-    /// on first use, then is reused across calls. Each parallel
-    /// worker thread has its own copy.
+    /// on first use, then is reused across calls **on the same
+    /// thread**. Note: scoped worker threads spawned by
+    /// `std::thread::scope` are fresh per call, so each spawned
+    /// worker re-allocates its 256 KB panel; only the calling
+    /// thread benefits from the persistent reuse. A persistent
+    /// thread pool would close that gap (see PHASE6_STATUS.md).
     static PACKED_B: RefCell<Vec<f32>> = RefCell::new(Vec::new());
 }
 
@@ -93,7 +210,14 @@ pub fn matmul(a: &Tensor<f32>, b: &Tensor<f32>) -> Tensor<f32> {
 /// On x86_64 dispatches to AVX-512, AVX2+FMA, or scalar based on
 /// runtime CPU feature detection. The AVX-512 path processes 16 f32
 /// lanes per fma; AVX2 processes 8. Both SIMD paths use cache
-/// blocking and 2-way row-parallelism for `m >= PARALLEL_THRESHOLD`.
+/// blocking and split the `m` dimension across `N` scoped worker
+/// threads for `m >= PARALLEL_THRESHOLD`, where `N` is computed by
+/// [`worker_count_for_shape`] as the minimum of the host
+/// parallelism (at most 8, overridable via `FERRO_MATMUL_THREADS`),
+/// the available row count (`m / MR_MIN`), and the total work
+/// available (`total_work / MIN_WORK_PER_WORKER`). The work cap
+/// keeps small shapes on the serial fast path where scoped-thread
+/// spawn overhead would otherwise dominate.
 #[inline]
 pub fn matmul_f32(a: &[f32], b: &[f32], c: &mut [f32], m: usize, n: usize, k: usize) {
     debug_assert_eq!(a.len(), m * k, "matmul_f32: a length mismatch");
@@ -136,8 +260,12 @@ fn matmul_f32_scalar(a: &[f32], b: &[f32], c: &mut [f32], m: usize, n: usize, k:
 // AVX-512 path
 // ============================================================================
 
-/// Public dispatcher for the AVX-512 path. Decides whether to run the
-/// serial blocked kernel or split `m` across two scoped threads.
+/// Public dispatcher for the AVX-512 path. Decides whether to run
+/// the serial blocked kernel or split `m` across `N` scoped worker
+/// threads, where `N` is computed by [`worker_count_for_shape`] —
+/// the minimum of the host parallelism, the available rows, and
+/// the total work available. Workers write into disjoint row
+/// ranges of `c` so the parallel split is borrow-checker safe.
 #[cfg(target_arch = "x86_64")]
 fn matmul_f32_avx512_dispatch(
     a: &[f32],
@@ -154,23 +282,27 @@ fn matmul_f32_avx512_dispatch(
         return;
     }
 
-    // Split the m (row of c) dimension in half. The two halves write
-    // to disjoint c regions, so the &mut split is safe.
-    let half = m / 2;
-    let (c1, c2) = c.split_at_mut(half * n);
-    let a1 = &a[..half * k];
-    let a2 = &a[half * k..m * k];
-    let m1 = half;
-    let m2 = m - half;
+    let workers = worker_count_for_shape(m, n, k);
+
+    if workers == 1 {
+        unsafe {
+            matmul_f32_avx512_serial(a, b, c, m, n, k);
+        }
+        return;
+    }
+
+    let rows_per_worker = (m + workers - 1) / workers;
 
     std::thread::scope(|s| {
-        s.spawn(|| {
-            unsafe {
-                matmul_f32_avx512_serial(a1, b, c1, m1, n, k);
-            }
-        });
-        unsafe {
-            matmul_f32_avx512_serial(a2, b, c2, m2, n, k);
+        let a_chunks = a.chunks(rows_per_worker * k);
+        let c_chunks = c.chunks_mut(rows_per_worker * n);
+        for (a_chunk, c_chunk) in a_chunks.zip(c_chunks) {
+            let m_local = a_chunk.len() / k;
+            s.spawn(move || {
+                unsafe {
+                    matmul_f32_avx512_serial(a_chunk, b, c_chunk, m_local, n, k);
+                }
+            });
         }
     });
 }
@@ -684,7 +816,10 @@ unsafe fn matmul_f32_avx512_small(
 // ============================================================================
 
 /// Public dispatcher for the AVX2 path. Decides whether to run the
-/// serial blocked kernel or split `m` across two scoped threads.
+/// serial blocked kernel or split `m` across `N` scoped worker
+/// threads, where `N` is computed by [`worker_count_for_shape`].
+/// Same parallelism strategy as the AVX-512 dispatcher above; only
+/// the underlying kernel differs.
 #[cfg(target_arch = "x86_64")]
 fn matmul_f32_avx2_dispatch(
     a: &[f32],
@@ -701,21 +836,27 @@ fn matmul_f32_avx2_dispatch(
         return;
     }
 
-    let half = m / 2;
-    let (c1, c2) = c.split_at_mut(half * n);
-    let a1 = &a[..half * k];
-    let a2 = &a[half * k..m * k];
-    let m1 = half;
-    let m2 = m - half;
+    let workers = worker_count_for_shape(m, n, k);
+
+    if workers == 1 {
+        unsafe {
+            matmul_f32_avx2_serial(a, b, c, m, n, k);
+        }
+        return;
+    }
+
+    let rows_per_worker = (m + workers - 1) / workers;
 
     std::thread::scope(|s| {
-        s.spawn(|| {
-            unsafe {
-                matmul_f32_avx2_serial(a1, b, c1, m1, n, k);
-            }
-        });
-        unsafe {
-            matmul_f32_avx2_serial(a2, b, c2, m2, n, k);
+        let a_chunks = a.chunks(rows_per_worker * k);
+        let c_chunks = c.chunks_mut(rows_per_worker * n);
+        for (a_chunk, c_chunk) in a_chunks.zip(c_chunks) {
+            let m_local = a_chunk.len() / k;
+            s.spawn(move || {
+                unsafe {
+                    matmul_f32_avx2_serial(a_chunk, b, c_chunk, m_local, n, k);
+                }
+            });
         }
     });
 }

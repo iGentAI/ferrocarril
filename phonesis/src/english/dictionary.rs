@@ -25,7 +25,7 @@ pub fn get_default_dictionary() -> Result<Arc<PronunciationDictionary>> {
     unsafe {
         INIT_DICTIONARY.call_once(|| {
             // Initialize dictionary with embedded data
-            match PronunciationDictionary::from_cmu_str(EMBEDDED_WIKIPRON_DICTIONARY, "en-us") {
+            match PronunciationDictionary::from_cmu_str(EMBEDDED_CMU_DICTIONARY, "en-us") {
                 Ok(mut dict) => {
                     // Add missing essential number words that aren't in WikiPron
                     add_missing_essentials(&mut dict);

@@ -1,40 +1,151 @@
 # Ferrocarril Review and Plan — April 2026
 
-> **Phases 1–5 are COMPLETE, Phase 6 performance optimization is in
-> progress** (updated April 7 2026 afternoon session).
+> **UPDATED April 8, 2026.** Phases 1-6 are complete, and ferrocarril has
+> achieved **quality parity** with Python kokoro on a broad 25-sample
+> diverse-input regression suite (mean WER 1.40% for both systems, gap
+> **exactly 0.00%**).
 >
 > **What's done:**
-> - **Phase 1** (consolidate + compile), **Phase 2** (canonicalize
->   layout + clean slate docs), and **Phase 3** (numerical correctness
->   per component) completed end of April 6 2026. The Rust Kokoro-82M
->   port matches the Python reference to f32 precision across every
->   transformer component (BERT / TextEncoder / DurationEncoder /
->   ProsodyPredictor / Decoder) and within ~1 % global RMS + 0.99
->   envelope correlation on the final generator audio.
+>
+> - **Phase 1** (consolidate + compile), **Phase 2** (canonicalize layout
+>   + clean slate docs), and **Phase 3** (numerical correctness per
+>   component) completed end of April 6. The Rust Kokoro-82M port matches
+>   the Python reference to f32 precision across every transformer
+>   component (BERT / TextEncoder / DurationEncoder / ProsodyPredictor /
+>   Decoder) and within ~1 % global RMS + 0.99 envelope correlation on
+>   the final generator audio.
 > - **Phase 4** (production cleanup: println noise stripped, dead-code
 >   warnings eliminated, module-level allow lists for documentation
 >   fields) and **Phase 5** (WebAssembly: `wasm32-unknown-unknown`
 >   compiles clean, `ferrocarril-wasm` crate exposes the inference
 >   pipeline via `wasm-bindgen`, bundled browser demo verified in
 >   Chromium) completed in a follow-up session.
-> - **Phase 6** (performance optimization) is currently in progress.
->   Native inference for the canonical "Hi" input has dropped from
->   ~258 s to **~2.0 s wall** (a ~130× speedup). The `matmul_f32`
->   kernel now runs at ~76 GFLOPS on the dominant Generator shape
->   (93 % of the 80 GFLOPS 2-FMA-port peak on the sandbox Xeon
->   Platinum 8175M). Still ~2× from real-time.
+> - **Phase 6 (performance optimization) — COMPLETE.** Native inference
+>   for the canonical "Hi" input dropped from ~258 s to **~2.0 s wall**
+>   (~130× speedup). The `matmul_f32` kernel runs at ~76 GFLOPS on the
+>   dominant Generator shape (93% of the 80 GFLOPS 2-FMA-port peak on
+>   the Xeon Platinum 8175M sandbox). On the Sapphire Rapids privileged
+>   sandbox, `ferrocarril infer` runs at **2.14× real-time** at N=8
+>   workers. Includes AVX-512 matmul (8×32 + 4×16 + 1×16 micro-kernels
+>   with BLIS-style b-panel packing + 3-level cache blocking + N-way
+>   m-dimension scoped-thread parallelism + work-threshold gating),
+>   AVX-512 linear dot-product kernel, LSTM / BERT direct-slice
+>   rewrites, AVX-512 Snake1D polynomial sin, and im2col Conv1d fast
+>   path. See `PHASE6_STATUS.md` for the full commit trail.
+> - **G2P quality fix (April 7 evening + April 8 morning)** —
+>   phonesis had three compounding bugs that made long audio garbled:
+>   (1) the embedded dictionary was a WikiPron-derived file generated
+>   by a broken IPA→ARPABET converter that had split `oʊ` diphthongs,
+>   lost all stress markers, and was missing common words like
+>   "world"; (2) the ARPABET→IPA mapping emitted standard IPA instead
+>   of Kokoro's encoded IPA (two-char diphthongs, `tʃ`/`dʒ`, ASCII
+>   `g`, alveolar trill `r`, no stress-dependent `AH`/`ER`); and
+>   (3) the dictionary loader used last-wins semantics so common
+>   words like "a" / "the" picked the wrong variants. Replaced with
+>   135k-entry CMU Pronouncing Dictionary, updated the ARPABET→IPA
+>   table to Kokoro's encoded IPA with stress-dependent `AH`/`ER`,
+>   added first-wins semantics, and split punctuation from the
+>   symbol-spelling `character_fallback`. Additionally added
+>   **misaki-style word boundaries** (single space between words,
+>   phonemes within a word concatenated), **function word
+>   destressing** (articles, auxiliaries, most pronouns, prepositions,
+>   conjunctions, modals — strip `ˈ`/`ˌ` markers from IPA output while
+>   preserving strong-vowel forms), **possessive pronoun
+>   demotion** (`my`/`your`/`our`/…: primary → secondary stress so
+>   "our" → `ˌWəɹ` instead of `Wəɹ`), and **Unicode punctuation
+>   tokenization** (em-dash, en-dash, ellipsis, curly quotes,
+>   guillemets all classified as `TokenType::Punctuation` instead of
+>   `Symbol`, so they use Kokoro's vocab pause markers instead of
+>   being pronounced as the spoken word "symbol").
+> - **Synthesis determinism + Gaussian noise fix (April 8 morning)** —
+>   `SineGen` and `SourceModuleHnNSF` in the vocoder were using
+>   `rand::thread_rng()` which reseeds from OS entropy on every
+>   binary invocation, making ferrocarril's audio output
+>   non-deterministic across runs. Two runs of the same input
+>   produced different md5 hashes, audible as a "warble" on longer
+>   samples (the user's observation that motivated this investigation).
+>   Additionally, the noise sampling used `(rng.gen::<f32>() * 2.0 -
+>   1.0)` — a uniform distribution on `[-1, 1]` with std ~0.577 —
+>   instead of Python kokoro's `torch.randn_like` which samples from
+>   the standard Gaussian `N(0, 1)` with std 1.0. Fix: replaced both
+>   `thread_rng()` sites with deterministic `StdRng::seed_from_u64(
+>   CONSTANT)` (different constants per site so the streams don't
+>   correlate), and added a `gaussian_sample` helper using Box-Muller
+>   transform to produce Gaussian samples with no new deps.
+>   Post-fix: two runs of the same input at N=1 and N=8 now all
+>   produce the identical md5 `3a0f9458221003f579a429cd770a2d2d`.
 >
-> **`cargo test --release --features weights` runs 24 passed / 0
-> failed / 0 ignored.** The `ferrocarril infer` CLI produces
-> intelligible 24 kHz audio from real text via G2P.
+> **Current state (April 8, 2026 morning):**
+>
+> - **Quality parity with Python kokoro.** Broad-test validation
+>   across 25 diverse text inputs (statements, questions,
+>   exclamations, contractions, numbers, proper nouns, technical
+>   vocab, dialog, news, poetry, conversational fillers, multi-
+>   questions, negations, subordinate clauses, commands, lists,
+>   em-dashes, semicolons, possessives, modals, idioms, pangrams,
+>   complex conditionals):
+>
+>   ```
+>   Rust WER:   mean = 1.40%   median = 0.00%   max = 25.0%   min = 0.0%
+>   Python WER: mean = 1.40%   median = 0.00%   max = 25.0%   min = 0.0%
+>   Gap (R-P):  mean = +0.00%  median = +0.00%  max = +0.0%   min = +0.0%
+>
+>   Samples where Rust > Python by > 5%:   (none)
+>   Samples where Python > Rust by > 5%:   (none)
+>   ```
+>
+>   The residual 1.40% WER is exclusively from Whisper normalizing
+>   "forty two" → "42" and "three" → "3" in two samples — shared
+>   between both systems, not a ferrocarril bug.
+>
+> - **Fully deterministic synthesis**. md5 of the same input across
+>   multiple runs at both N=1 and N=8 is identical.
+>
+> - **All tests passing**: `cargo test --release --features weights`
+>   → **24 passed / 0 failed / 0 ignored** in ferrocarril, and
+>   `cargo test --release` → **124 passed / 0 failed** in phonesis.
+>   Total 148 tests across both crates.
+>
+> - **End-to-end inference** via the CLI produces intelligible 24 kHz
+>   audio from real text through the built-in phonesis G2P, matching
+>   Python kokoro on all non-OOV inputs within Whisper's own noise
+>   floor.
 >
 > **For the current state and next steps, read:**
+>
 > - **`HANDOFF.md`** — authoritative "what's done and what's next"
->   document. Covers Phases 1-5 tactical summary, test matrix, sandbox
->   setup, API surface, and a §5 pointer into Phase 6.
+>   document. Covers Phases 1-5 tactical summary, test matrix,
+>   sandbox setup, API surface, and a §5 pointer into Phase 6.
 > - **`PHASE6_STATUS.md`** — Phase 6 performance optimization log:
->   full progression from 258 s to 2 s, commit trail, current profile
->   breakdown, reproduction commands, and remaining opportunities.
+>   full progression from 258 s to 2 s, commit trail, current
+>   profile breakdown, reproduction commands, and remaining
+>   opportunities.
+> - The top of this file — live "current thinking" including the
+>   April 8 quality-parity data above.
+>
+> **Remaining known limitations:**
+>
+> 1. **510-token hard cap on single-call inference**. Inputs longer
+>    than ~510 IPA characters (including whitespace and punctuation)
+>    are truncated because of Kokoro's BERT
+>    `max_position_embeddings = 512` minus BOS/EOS. Python kokoro
+>    avoids this by internal sentence chunking via
+>    `KPipeline.__call__`. Ferrocarril's CLI does not currently
+>    chunk — adding a sentence-boundary splitter in
+>    `ferrocarril/src/model/g2p.rs` or `main.rs` is the natural
+>    follow-up, and would restore parity on the longest test samples
+>    (Gettysburg 4+ sentences, etc.).
+> 2. **Out-of-vocabulary words** fall through to phonesis's rules
+>    engine which produces letter-by-letter character-fallback
+>    output. For example "ferrocarril" (not in CMU dict) comes
+>    through as a garbled string instead of misaki's
+>    `fˈɛɹəkˌæɹᵊl`. Python kokoro has the same issue — both score
+>    9.1% WER on the test phrase that contains "ferrocarril". A
+>    future fix would be an espeak-ng-style letter-to-sound engine
+>    specifically for OOV fallback, but it's not critical for
+>    normal text.
+> 3. **Flatten the nested workspace** (`ferrocarril/ferrocarril/` →
+>    `ferrocarril/`). Pure refactor, deferred for diff hygiene.
 >
 > The rest of this file is retained as historical context (especially
 > §3 "Is Kokoro Still the Right Target?" and the phased roadmap).

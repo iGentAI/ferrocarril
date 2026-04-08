@@ -12,7 +12,7 @@ use crate::{
     G2POptions,
     FallbackStrategy,
     error::{G2PError, Result},
-    phoneme::{Phoneme, PhonemeSequence, PhonemeStandard},
+    phoneme::{Phoneme, PhonemeSequence, PhonemeStandard, StressLevel},
     dictionary::PronunciationDictionary,
     rules::{RuleEngine, RuleContext},
     normalizer::Normalizer,
@@ -223,6 +223,114 @@ impl EnglishG2P {
         
         Ok(PhonemeSequence::new(phonemes))
     }
+
+    /// Returns true if `word` is a common English function word
+    /// that should be fully destressed in misaki-style output.
+    ///
+    /// Function words (articles, conjunctions, most prepositions,
+    /// personal pronouns, auxiliary verbs, demonstratives, modal
+    /// verbs) are typically pronounced with NO stress marker in
+    /// connected speech, but retain their strong vowel form
+    /// (e.g. "of" → `ʌv`, not `əv`). The `convert` method
+    /// implements this by converting each phoneme to IPA via
+    /// `to_string_in` and then stripping the `ˈ`/`ˌ` marker
+    /// characters from the output, which drops the marker
+    /// without triggering the stress-dependent AH/ER mapping
+    /// that would otherwise weaken the vowel to `ə`/`əɹ`.
+    ///
+    /// Note: **possessive pronouns** (my, your, his, her, its,
+    /// our, their, mine, yours, hers, ours, theirs) are NOT in
+    /// this list — they're in `is_demoted_word` because misaki
+    /// renders them with secondary stress (e.g. `ˌWəɹ` for
+    /// "our") rather than fully destressed.
+    fn is_function_word(word: &str) -> bool {
+        matches!(word.to_lowercase().as_str(),
+            // Articles
+            "a" | "an" | "the" |
+            // Coordinating conjunctions
+            "and" | "or" | "but" | "nor" | "so" | "yet" | "for" |
+            // Subordinating conjunctions
+            "as" | "if" | "than" | "though" | "while" | "because" |
+            "although" | "since" | "until" | "unless" | "whereas" | "whether" |
+            // Common prepositions
+            "of" | "in" | "at" | "by" | "on" | "to" | "with" | "from" |
+            "into" | "onto" | "about" | "above" | "across" | "after" |
+            "against" | "along" | "among" | "around" | "before" | "behind" |
+            "below" | "beneath" | "beside" | "between" | "beyond" |
+            "down" | "during" | "except" | "inside" | "near" | "off" |
+            "out" | "outside" | "over" | "past" | "through" | "throughout" |
+            "toward" | "towards" | "under" | "underneath" | "up" |
+            "upon" | "within" | "without" |
+            // Personal pronouns (subject/object)
+            "i" | "you" | "he" | "she" | "it" | "we" | "they" |
+            "me" | "him" | "us" | "them" |
+            // Demonstratives
+            "this" | "that" | "these" | "those" |
+            // Forms of "to be"
+            "am" | "is" | "are" | "was" | "were" | "be" | "been" | "being" |
+            // Forms of "to have"
+            "have" | "has" | "had" | "having" |
+            // Forms of "to do"
+            "do" | "does" | "did" | "doing" | "done" |
+            // Modal auxiliary verbs
+            "will" | "would" | "shall" | "should" | "can" | "could" |
+            "may" | "might" | "must" | "ought" |
+            // Question / relativizing words (often unstressed)
+            "what" | "who" | "whom" | "whose" | "why" | "how" |
+            "where" | "when" | "which"
+        )
+    }
+
+    /// Returns true if `word` is a common English word that
+    /// should be **demoted** to secondary stress in connected
+    /// speech (primary stress marker `ˈ` becomes secondary `ˌ`),
+    /// rather than fully destressed.
+    ///
+    /// This applies to possessive pronouns and adjectives —
+    /// words like "our", "my", "your", "her", etc. Misaki
+    /// renders "our" as `ˌWəɹ` (secondary-stress W diphthong
+    /// followed by rhotacized schwa) rather than `Wəɹ` (no
+    /// marker) or `ˈWəɹ` (full primary stress). The secondary
+    /// marker gives the initial diphthong enough prosodic
+    /// weight that downstream Whisper / ASR systems correctly
+    /// hear "our" instead of confusing it for "or".
+    ///
+    /// Reflexive pronouns ("myself", "yourself", …) are
+    /// intentionally omitted — they're usually content-bearing
+    /// in English sentences and keep full primary stress.
+    fn is_demoted_word(word: &str) -> bool {
+        matches!(word.to_lowercase().as_str(),
+            // Possessive pronouns (dependent form, used with a noun)
+            "my" | "your" | "his" | "her" | "its" | "our" | "their" |
+            // Possessive pronouns (independent form)
+            "mine" | "yours" | "hers" | "ours" | "theirs"
+        )
+    }
+
+    /// Push a misaki-style word boundary marker (a single
+    /// space-symbol IPA `Phoneme`) into `result`, but only if
+    /// `result` is non-empty and the last phoneme isn't already
+    /// a space. Used at the start of every Word/Number/
+    /// Alphanumeric/Symbol token's emission to ensure the output
+    /// has a single space between word groups (and not between
+    /// word-internal phonemes), matching misaki's `həlˈO wˈɜɹld`
+    /// format rather than the previous `h ə l ˈO w ˈɜɹ l d`
+    /// format that put a separator between every phoneme.
+    fn push_word_boundary(result: &mut Vec<Phoneme>) {
+        if result.is_empty() {
+            return;
+        }
+        if let Some(last) = result.last() {
+            if last.symbol == " " {
+                return;
+            }
+        }
+        result.push(Phoneme::new_with_standard(
+            " ".to_string(),
+            None,
+            PhonemeStandard::IPA,
+        ));
+    }
 }
 
 impl GraphemeToPhoneme for EnglishG2P {
@@ -231,56 +339,70 @@ impl GraphemeToPhoneme for EnglishG2P {
         let normalized = self.normalizer.normalize(text)?;
         
         // Tokenize the normalized text for word-by-word processing
-        // We're reusing the tokenizer from the normalizer
         let tokens = self.normalizer.tokenizer.tokenize(&normalized);
         
         let mut result = Vec::new();
-        
-        // Process each token
+
         for token in tokens {
             match token.token_type {
                 crate::normalizer::TokenType::Word => {
-                    // Look up in dictionary
-                    if let Some(pronunciation) = self.dictionary.lookup(&token.text) {
-                        // Add all phonemes to the result
-                        for phoneme in &pronunciation.phonemes {
-                            result.push(phoneme.clone());
-                        }
+                    Self::push_word_boundary(&mut result);
+
+                    // Look up in dictionary first; fall back to
+                    // rules / character fallback if missing.
+                    let mut word_phonemes: Vec<Phoneme> = if let Some(pronunciation) = self.dictionary.lookup(&token.text) {
+                        pronunciation.phonemes.clone()
                     } else {
-                        // Apply fallback strategy for unknown words
                         match self.apply_fallback(&token.text, None) {
-                            Ok(pronunciation) => {
-                                // Add phonemes from fallback
-                                for phoneme in pronunciation.phonemes {
-                                    result.push(phoneme);
-                                }
-                            },
+                            Ok(p) => p.phonemes,
                             Err(e) => {
                                 if self.options.fallback_strategy == FallbackStrategy::Skip {
-                                    // Propagate the error directly for Skip strategy
                                     return Err(e);
-                                } else {
-                                    // For other strategies, this should not happen due to character_fallback
-                                    // But if it does, use emergency fallback
-                                    match self.character_fallback(&token.text) {
-                                        Ok(pronunciation) => {
-                                            for phoneme in pronunciation.phonemes {
-                                                result.push(phoneme);
-                                            }
-                                        },
-                                        Err(_) => {
-                                            // Last resort: add a silence phoneme
-                                            result.push(Phoneme::new("SIL", None));
-                                        }
-                                    }
+                                }
+                                // Last-resort character fallback;
+                                // emit a silence if even that fails.
+                                self.character_fallback(&token.text)
+                                    .map(|p| p.phonemes)
+                                    .unwrap_or_else(|_| vec![Phoneme::new("SIL", None)])
+                            }
+                        }
+                    };
+
+                    if Self::is_function_word(&token.text) {
+                        for p in &word_phonemes {
+                            let ipa = p.to_string_in(PhonemeStandard::IPA);
+                            for c in ipa.chars() {
+                                if c != 'ˈ' && c != 'ˌ' {
+                                    result.push(Phoneme::new_with_standard(
+                                        c.to_string(),
+                                        None,
+                                        PhonemeStandard::IPA,
+                                    ));
                                 }
                             }
                         }
+                    } else if Self::is_demoted_word(&token.text) {
+                        for p in word_phonemes.iter_mut() {
+                            if matches!(p.stress, Some(StressLevel::Primary)) {
+                                p.stress = Some(StressLevel::Secondary);
+                            }
+                        }
+                        result.extend(word_phonemes);
+                    } else {
+                        result.extend(word_phonemes);
                     }
                 },
-                crate::normalizer::TokenType::Punctuation | 
+                crate::normalizer::TokenType::Punctuation => {
+                    for c in token.text.chars() {
+                        result.push(Phoneme::new_with_standard(
+                            c.to_string(),
+                            None,
+                            PhonemeStandard::IPA,
+                        ));
+                    }
+                },
                 crate::normalizer::TokenType::Symbol => {
-                    // Handle punctuation and symbols through fallback
+                    Self::push_word_boundary(&mut result);
                     match self.character_fallback(&token.text) {
                         Ok(pronunciation) => {
                             for phoneme in pronunciation.phonemes {
@@ -288,7 +410,6 @@ impl GraphemeToPhoneme for EnglishG2P {
                             }
                         },
                         Err(_) => {
-                            // Fallback failed, skip or add silence based on strategy
                             if self.options.fallback_strategy != FallbackStrategy::Skip {
                                 result.push(Phoneme::new("SIL", None));
                             }
@@ -296,8 +417,7 @@ impl GraphemeToPhoneme for EnglishG2P {
                     }
                 },
                 crate::normalizer::TokenType::Number => {
-                    // Numbers should have been processed in normalization
-                    // If we still have a Number token, try to convert it
+                    Self::push_word_boundary(&mut result);
                     match self.apply_fallback(&token.text, None) {
                         Ok(pronunciation) => {
                             for phoneme in pronunciation.phonemes {
@@ -305,7 +425,6 @@ impl GraphemeToPhoneme for EnglishG2P {
                             }
                         },
                         Err(_) => {
-                            // Use character fallback for numbers
                             match self.character_fallback(&token.text) {
                                 Ok(pronunciation) => {
                                     for phoneme in pronunciation.phonemes {
@@ -320,7 +439,7 @@ impl GraphemeToPhoneme for EnglishG2P {
                     }
                 },
                 crate::normalizer::TokenType::Alphanumeric => {
-                    // Mixed alphanumeric tokens
+                    Self::push_word_boundary(&mut result);
                     match self.apply_fallback(&token.text, None) {
                         Ok(pronunciation) => {
                             for phoneme in pronunciation.phonemes {
@@ -328,7 +447,6 @@ impl GraphemeToPhoneme for EnglishG2P {
                             }
                         },
                         Err(_) => {
-                            // Use character fallback
                             match self.character_fallback(&token.text) {
                                 Ok(pronunciation) => {
                                     for phoneme in pronunciation.phonemes {
@@ -343,11 +461,10 @@ impl GraphemeToPhoneme for EnglishG2P {
                     }
                 },
                 crate::normalizer::TokenType::Whitespace => {
-                    // Skip whitespace tokens
                     continue;
                 },
                 crate::normalizer::TokenType::Unknown => {
-                    // Handle unknown token types through character fallback
+                    Self::push_word_boundary(&mut result);
                     match self.character_fallback(&token.text) {
                         Ok(pronunciation) => {
                             for phoneme in pronunciation.phonemes {

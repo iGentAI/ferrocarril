@@ -329,22 +329,19 @@ impl FerroModel {
             (Some(text_encoder), Some(prosody_predictor), Some(decoder), Some(bert), Some(bert_encoder)) => {
                 // 1. Convert phonemes to token IDs.
                 //
-                // Kokoro tokenizes the phoneme stream character-by-character,
-                // looking up each single IPA code point (diphthongs like `oʊ`
-                // are TWO tokens: `o` and `ʊ`). Whitespace in the Phonesis
-                // output is a separator, not a token.
+                // Kokoro tokenizes the phoneme stream
+                // character-by-character, looking up each single
+                // IPA code point (diphthongs like `oʊ` are TWO
+                // tokens: `o` and `ʊ`). Misaki / phonesis emit
+                // word boundaries as a single ASCII space
+                // (`" "` = vocab id 16) which the model treats
+                // as a word-separator token.
                 let mut token_ids: Vec<i64> = Vec::new();
                 token_ids.push(0); // Start of sequence token <bos>
 
                 for ch in phonemes.chars() {
-                    if ch.is_whitespace() {
-                        continue;
-                    }
                     if let Some(&id) = self.config.vocab.get(&ch) {
                         token_ids.push(id as i64);
-                    } else {
-                        // Unknown phoneme: skip silently. The G2P layer
-                        // owns vocabulary correctness.
                     }
                 }
 

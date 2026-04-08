@@ -136,8 +136,11 @@ impl PronunciationDictionary {
                 phonemes.push(Phoneme::new(p_str, stress));
             }
             
-            // Insert into dictionary
-            dict.insert(&word, PhonemeSequence::new(phonemes));
+            // Insert into dictionary (first-wins: skip if already present)
+            let lc_word = word.to_lowercase();
+            if !dict.contains(&lc_word) {
+                dict.insert(&lc_word, PhonemeSequence::new(phonemes));
+            }
         }
         
         // Update metadata
@@ -190,8 +193,11 @@ impl PronunciationDictionary {
                 phonemes.push(Phoneme::new(p_str, stress));
             }
             
-            // Insert into dictionary
-            dict.insert(&word.to_lowercase(), PhonemeSequence::new(phonemes));
+            // Insert into dictionary (first-wins: skip if already present)
+            let lc_word = word.to_lowercase();
+            if !dict.contains(&lc_word) {
+                dict.insert(&lc_word, PhonemeSequence::new(phonemes));
+            }
         }
         
         // Update metadata

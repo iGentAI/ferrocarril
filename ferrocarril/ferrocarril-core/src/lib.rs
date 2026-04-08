@@ -277,10 +277,10 @@ impl PhonesisG2P {
         let inner = self.inner.lock()
             .map_err(|e| FerroError::new(format!("Failed to lock G2P: {}", e)))?;
     
-        // First try regular conversion with the default strategy
-        match inner.convert_to_standard(text, self.standard) {
+        // First try regular conversion with the default strategy.
+        let result = match inner.convert_to_standard(text, self.standard) {
             Ok(phonemes) => {
-                Ok(phonemes.join(" "))
+                Ok(phonemes.join(""))
             },
             Err(e) => {
                 // If the default strategy fails (for example, UseRules for unknown words),
@@ -302,7 +302,7 @@ impl PhonesisG2P {
                                 "ferrocarril: warning: using grapheme fallback for unknown word(s) in: '{}'",
                                 text
                             );
-                            Ok(phonemes.join(" "))
+                            Ok(phonemes.join(""))
                         },
                         Err(e) => {
                             // If even the fallback fails, propagate the error
@@ -314,6 +314,24 @@ impl PhonesisG2P {
                     Err(FerroError::new(format!("G2P conversion error: {}", e)))
                 }
             }
+        };
+
+        if std::env::var("FERRO_DEBUG_G2P").is_ok() {
+            if let Ok(ref p) = result {
+                let non_ws: String = p.chars().filter(|c| !c.is_whitespace()).collect();
+                eprintln!(
+                    "[ferro-g2p] input: {:?}",
+                    text
+                );
+                eprintln!(
+                    "[ferro-g2p] output: ({} non-ws chars, {} bytes) {:?}",
+                    non_ws.chars().count(),
+                    p.len(),
+                    p
+                );
+            }
         }
+
+        result
     }
 }

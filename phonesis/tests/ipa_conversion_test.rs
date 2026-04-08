@@ -18,12 +18,19 @@ use std::collections::HashMap;
 fn test_arpabet_to_ipa_vowel_conversion() -> Result<(), Box<dyn std::error::Error>> {
     let g2p = EnglishG2P::new()?;
     
-    // Test specific vowel conversions known to be critical for TTS
+    // Test specific vowel conversions known to be critical for TTS.
+    //
+    // Note: the AH-stressed check uses "cup" (a content word) rather
+    // than "but" (a coordinating conjunction). After the misaki-style
+    // function-word destressing, "but" is emitted as `b ə t`
+    // (unstressed schwa) because conjunctions are reduced in connected
+    // speech. "cup" isn't in the function-word list, so its CMU
+    // `K AH1 P` keeps its primary stress and correctly maps to `kˈʌp`.
     let test_cases = [
         ("cat", "æ"),      // AE → æ  
         ("bet", "ɛ"),      // EH → ɛ
         ("bit", "ɪ"),      // IH → ɪ
-        ("but", "ʌ"),      // AH → ʌ (if properly mapped)
+        ("cup", "ʌ"),      // AH1 → ʌ (stressed, non-function word)
         ("boot", "u"),     // UW → u
         ("book", "ʊ"),     // UH → ʊ
     ];

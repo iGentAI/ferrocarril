@@ -6,11 +6,8 @@
 #[cfg(test)]
 mod tests {
     // Update to use the G2PHandler struct from model module
-    use ferrocarril::model::g2p::G2PHandler;
+    use ferrocarril::model::g2p::{G2PHandler, MAX_PHONEME_TOKENS};
     use std::error::Error;
-
-    // Define the max phoneme length constant to match G2PHandler
-    const MAX_PHONEME_LENGTH: usize = 510;
 
     #[test]
     fn test_g2p_basic_conversion() -> Result<(), Box<dyn Error>> {
@@ -28,16 +25,24 @@ mod tests {
         assert!(result.success, "Basic conversion should succeed");
         assert!(!result.phonemes.is_empty(), "Should produce non-empty phonemes");
         
-        // The G2P emits IPA (matching Kokoro's vocab). Check for IPA characters
-        // expected in "Hello, world!": 'ɛ' (vowel of "hello") and 'l'.
         assert!(
-            result.phonemes.contains("ɛ"),
-            "Should contain 'ɛ' phoneme for 'hello' (got: {})",
+            result.phonemes.contains('h'),
+            "Should contain 'h' phoneme for 'Hello' (got: {})",
             result.phonemes
         );
         assert!(
             result.phonemes.contains('l'),
             "Should contain 'l' phoneme (got: {})",
+            result.phonemes
+        );
+        assert!(
+            result.phonemes.contains('O'),
+            "Should contain 'O' (Kokoro /oʊ/) phoneme for 'Hello' (got: {})",
+            result.phonemes
+        );
+        assert!(
+            result.phonemes.contains('ɜ'),
+            "Should contain 'ɜ' phoneme for stressed-ER of 'world' (got: {})",
             result.phonemes
         );
         
@@ -148,16 +153,29 @@ mod tests {
         let long_text = "hello ".repeat(200);
         let result = handler.convert(&long_text);
         
+        let token_count = result.phonemes.chars().count();
+        let non_ws_count = result
+            .phonemes
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .count();
+        
         println!("Input length: {} characters", long_text.len());
-        println!("Output length: {} characters", result.phonemes.len());
+        println!(
+            "Output length: {} total chars ({} non-whitespace)",
+            token_count, non_ws_count
+        );
         
         // Should handle long text without errors
         assert!(!result.phonemes.is_empty(), "Should produce some output for long text");
         
-        // Enforce that the output doesn't exceed the maximum length
-        assert!(result.phonemes.len() <= MAX_PHONEME_LENGTH, 
-                "Phoneme output must not exceed MAX_PHONEME_LENGTH ({}), got {} characters", 
-                MAX_PHONEME_LENGTH, result.phonemes.len());
+        assert!(
+            token_count <= MAX_PHONEME_TOKENS,
+            "Phoneme output must not exceed MAX_PHONEME_TOKENS ({}) tokens, got {} total chars ({} non-whitespace)",
+            MAX_PHONEME_TOKENS,
+            token_count,
+            non_ws_count
+        );
         
         Ok(())
     }

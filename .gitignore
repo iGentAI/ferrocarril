@@ -9,6 +9,10 @@ target/
 # MSVC Windows builds of rustc generate these, which store debugging information
 *.pdb
 
+# Linux core dumps (produced when a release binary crashes — 2-3 MB
+# each and must not be synced through the filestore).
+core.*
+
 # Converted Kokoro model weights and voices (~341MB).
 # These are reproduced on demand by `python3 weight_converter.py
 # --huggingface hexgrad/Kokoro-82M --output ferrocarril_weights`

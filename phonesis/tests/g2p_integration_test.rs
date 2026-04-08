@@ -21,13 +21,14 @@ fn test_basic_conversion() -> Result<(), Box<dyn std::error::Error>> {
     // Test conversion with a simple word
     let phonemes = g2p.convert("hello")?;
     
-    // Hello should have 5 phonemes in our current implementation: HH EH0 L OW0 UH0
-    assert_eq!(phonemes.len(), 5);
+    // Hello has 4 ARPABET phonemes in CMU dict: `HH AH0 L OW1`.
+    assert_eq!(phonemes.len(), 4, "hello should be 4 ARPABET phonemes");
     assert_eq!(phonemes[0].symbol, "HH");
-    assert_eq!(phonemes[1].symbol, "EH");
-    assert!(phonemes[1].stress.is_some()); // Allow any stress value
+    assert_eq!(phonemes[1].symbol, "AH");
+    assert!(phonemes[1].stress.is_some());
     assert_eq!(phonemes[2].symbol, "L");
-    // The rest of the phonemes may vary by implementation
+    assert_eq!(phonemes[3].symbol, "OW");
+    assert!(phonemes[3].stress.is_some());
     
     Ok(())
 }

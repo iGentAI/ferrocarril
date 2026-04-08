@@ -2,8 +2,16 @@
 
 use crate::{Forward, linear::Linear};
 use ferrocarril_core::tensor::Tensor;
-use super::sinegen::SineGen;
-use rand::Rng;
+use super::sinegen::{SineGen, gaussian_sample};
+use rand::SeedableRng;
+use rand::rngs::StdRng;
+
+/// Deterministic seed for the source-noise RNG in
+/// `SourceModuleHnNSF::forward`. Fixed so repeated runs of the
+/// binary produce identical output for identical inputs. Chosen
+/// to be different from the seeds in `sinegen.rs` so the two
+/// noise streams don't correlate.
+const SOURCE_NOISE_SEED: u64 = 0xFE43_5005_CE00_0000;
 
 /// SourceModuleHnNSF for generating source excitation 
 /// based on F0 input
@@ -82,11 +90,17 @@ impl SourceModuleHnNSF {
             }
         }
         
-        // Generate noise source
-        let mut rng = rand::thread_rng();
+        // Generate noise source. Deterministically-seeded RNG and
+        // Gaussian samples via `gaussian_sample` (Box-Muller) to
+        // match Python's `torch.randn_like(uv) * self.sine_amp /
+        // 3`. The previous implementation used
+        // `(rng.gen::<f32>() * 2.0 - 1.0)` (uniform on `[-1, 1]`,
+        // std 0.577) which is a different distribution from the
+        // Gaussian `N(0, 1)` that the reference uses.
+        let mut rng = StdRng::seed_from_u64(SOURCE_NOISE_SEED);
         let mut noise_source = vec![0.0; batch * time];
         for i in 0..batch * time {
-            noise_source[i] = (rng.gen::<f32>() * 2.0 - 1.0) * self.sine_amp / 3.0;
+            noise_source[i] = gaussian_sample(&mut rng) * self.sine_amp / 3.0;
         }
         
         (
