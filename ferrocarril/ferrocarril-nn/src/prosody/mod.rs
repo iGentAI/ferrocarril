@@ -1,5 +1,11 @@
 //! Prosody predictor (duration, F0, noise) – Rust port of kokoro implementation with STRICT VALIDATION
 
+// Several helper methods and loop-binding variables below are kept for
+// documentation / shape-validation purposes even when the optimised forward
+// path doesn't read them. Suppress dead-code and unused-variable warnings
+// module-wide so the build log stays clean.
+#![allow(dead_code, unused_variables)]
+
 use crate::{
     lstm::LSTM,
     linear::Linear,
@@ -48,22 +54,20 @@ fn apply_mask_strict(tensor: &mut Tensor<f32>, mask: &Tensor<bool>, value: f32) 
 
 // Forward declaration of submodules
 mod duration_encoder;
-mod resblk1d;
 
-use duration_encoder::DurationEncoder;
-use resblk1d::AdainResBlk1d;
+pub use duration_encoder::DurationEncoder;
+use crate::vocoder::AdainResBlk1d;
 
 /// Main prosody predictor with STRICT tensor shape validation
 pub struct ProsodyPredictor {
-    // sub-modules
-    pub(crate) txt_enc: DurationEncoder,
-    pub(crate) dur_lstm: LSTM,
-    pub(crate) dur_proj: Linear,
-    pub(crate) shared_lstm: LSTM,
-    pub(crate) f0_blocks: Vec<AdainResBlk1d>,
-    pub(crate) noise_blocks: Vec<AdainResBlk1d>,
-    pub(crate) f0_proj: Conv1d,
-    pub(crate) noise_proj: Conv1d,
+    pub txt_enc: DurationEncoder,
+    pub dur_lstm: LSTM,
+    pub dur_proj: Linear,
+    pub shared_lstm: LSTM,
+    pub f0_blocks: Vec<AdainResBlk1d>,
+    pub noise_blocks: Vec<AdainResBlk1d>,
+    pub f0_proj: Conv1d,
+    pub noise_proj: Conv1d,
     
     // configuration
     pub max_dur: usize,
@@ -156,91 +160,49 @@ impl ProsodyPredictor {
             "STRICT: Alignment input time {} != txt_feat time {}", alignment.shape()[0], seq_len);
 
         // 1) Duration encoder processing - STRICT INPUT AND OUTPUT VALIDATION
-        println!("🔍 ProsodyPredictor calling DurationEncoder with STRICT validation...");
         let d_enc = self.txt_enc.forward(txt_feat, style, text_mask);
 
-        // STRICT: Validate DurationEncoder output - MUST be [B, T, d_model] per PyTorch
-        // NO STYLE CHANNELS should remain in DurationEncoder output
-        let expected_d_enc_shape = vec![batch_size, seq_len, self.d_model];
+        // STRICT: DurationEncoder follows Python and returns [B, T, d_model + style_dim]
+        let expected_d_enc_shape = vec![batch_size, seq_len, self.d_model + self.style_dim];
         assert_eq!(d_enc.shape(), expected_d_enc_shape,
-            "CRITICAL: DurationEncoder returned WRONG shape: expected {:?} [B,T,d_model], got {:?}. \
-            This indicates DurationEncoder is still leaking style channels.",
+            "CRITICAL: DurationEncoder returned WRONG shape: expected {:?} [B,T,d_model+style_dim], got {:?}",
             expected_d_enc_shape, d_enc.shape());
-        
-        println!("✅ DurationEncoder output STRICTLY validated: {:?} [B,T,d_model] - no style channels", d_enc.shape());
-        
-        // 2) Duration LSTM processing - ADD STYLE BACK FOR LSTM INPUT
-        // Since DurationEncoder correctly drops style, we must re-add it for dur_lstm
-        // Expand style to match sequence length: [B, style_dim] → [B, T, style_dim]
-        let mut style_expanded = vec![0.0; batch_size * seq_len * self.style_dim];
-        for b in 0..batch_size {
-            for t in 0..seq_len {
-                for s in 0..self.style_dim {
-                    style_expanded[b * seq_len * self.style_dim + t * self.style_dim + s] = 
-                        style[&[b, s]];
-                }
-            }
-        }
-        let style_btc = Tensor::from_data(style_expanded, vec![batch_size, seq_len, self.style_dim]);
-        
-        // Concatenate d_enc [B,T,d_model] + style [B,T,style_dim] → [B,T,d_model+style_dim]
-        let mut dur_lstm_input = vec![0.0; batch_size * seq_len * (self.d_model + self.style_dim)];
-        for b in 0..batch_size {
-            for t in 0..seq_len {
-                // Copy d_model features
-                for c in 0..self.d_model {
-                    dur_lstm_input[b * seq_len * (self.d_model + self.style_dim) + t * (self.d_model + self.style_dim) + c] = 
-                        d_enc[&[b, t, c]];
-                }
-                // Copy style features  
-                for s in 0..self.style_dim {
-                    dur_lstm_input[b * seq_len * (self.d_model + self.style_dim) + t * (self.d_model + self.style_dim) + self.d_model + s] = 
-                        style_btc[&[b, t, s]];
-                }
-            }
-        }
-        let dur_lstm_input_tensor = Tensor::from_data(dur_lstm_input, vec![batch_size, seq_len, self.d_model + self.style_dim]);
-        
-        // STRICT: Validate LSTM input has exactly the expected dimensions
-        assert_eq!(dur_lstm_input_tensor.shape(), &[batch_size, seq_len, self.d_model + self.style_dim],
-            "STRICT: Duration LSTM input shape validation failed");
-        assert_eq!(dur_lstm_input_tensor.shape()[2], 640,
-            "STRICT: Duration LSTM input must have 640 features (512+128), got {}",
-            dur_lstm_input_tensor.shape()[2]);
-        
-        println!("✅ Duration LSTM input STRICTLY validated: {:?} [B,T,d_model+style=640]", dur_lstm_input_tensor.shape());
-        
-        // Now dur_lstm gets the correct [B,T,d_model+style_dim] input - NO MORE "expected 640, got 133"
+
+        // 2) Duration LSTM
+        let dur_lstm_input_tensor = d_enc.clone();
+
+        assert_eq!(
+            dur_lstm_input_tensor.shape(),
+            &[batch_size, seq_len, self.d_model + self.style_dim],
+            "STRICT: Duration LSTM input shape validation failed (expected [{},{},{}], got {:?})",
+            batch_size,
+            seq_len,
+            self.d_model + self.style_dim,
+            dur_lstm_input_tensor.shape()
+        );
+
         let (dur_out, _) = self.dur_lstm.forward_batch_first(&dur_lstm_input_tensor, None, None);
-        
+
         // STRICT: Validate LSTM output shape
         assert_eq!(dur_out.shape(), &[batch_size, seq_len, self.d_model],
             "STRICT: Duration LSTM output shape mismatch: expected [{},{},{}], got {:?}",
             batch_size, seq_len, self.d_model, dur_out.shape());
 
-        println!("✅ Duration LSTM output validated: {:?} [B,T,d_model]", dur_out.shape());
-
-        // 3) Duration projection - PYTORCH ALIGNED
+        // 3) Duration projection
         let dur_logits = self.dur_proj.forward(&dur_out);
         
         // STRICT: Validate duration projection  
         assert_eq!(dur_logits.shape(), &[batch_size, seq_len, self.max_dur],
             "STRICT: Duration projection shape mismatch");
 
-        println!("✅ Duration projection output: {:?} [B,T,max_dur]", dur_logits.shape());
+        // 4) Energy pooling: en = d.transpose(-1, -2) @ alignment
+        let d_transposed = self.transpose_btc_to_bct_strict(&d_enc)?;
 
-        // 4) Energy pooling - USE d_enc WITH STYLE RE-ADDED FOR POOLING
-        // PyTorch pools from tensor that has style - we use the LSTM input tensor that has both
-        let d_enc_with_style = dur_lstm_input_tensor.clone(); // [B,T,d_model+style_dim] 
-        
-        let d_transposed = self.transpose_btc_to_bct_strict(&d_enc_with_style)?;
-        println!("Energy pooling input: d.transpose(-1, -2): {:?} [B,d_model+style,T]", d_transposed.shape());
-        
         // STRICT: Validate transpose for energy pooling
         assert_eq!(d_transposed.shape(), &[batch_size, self.d_model + self.style_dim, seq_len],
             "STRICT: Energy pooling transpose failed");
-        
-        // Matrix multiplication: [B, d_model+style, T] @ [T, S] → [B, d_model+style, S]  
+
+        // Matrix multiplication: [B, d_model+style, T] @ [T, S] → [B, d_model+style, S]
         let frames = alignment.shape()[1];
         let en = self.matmul_bct_ts_strict(&d_transposed, alignment)?;
         
@@ -248,10 +210,6 @@ impl ProsodyPredictor {
         assert_eq!(en.shape(), &[batch_size, self.d_model + self.style_dim, frames],
             "STRICT: Energy pooling output shape mismatch: expected [{}, {}, {}], got {:?}",
             batch_size, self.d_model + self.style_dim, frames, en.shape());
-
-        println!("✅ Energy pooling output STRICTLY validated: {:?} [B,d_model+style,S]", en.shape());
-        println!("🎯 ProsodyPredictor CORRECTED output shapes - dur_logits: {:?}, en: {:?}", 
-                 dur_logits.shape(), en.shape());
 
         Ok((dur_logits, en))
     }
@@ -297,29 +255,36 @@ impl ProsodyPredictor {
 
         // F0 prediction branch
         let mut f0 = shared_bct.clone();
-        for (i, block) in self.f0_blocks.iter().enumerate() {
+        for block in self.f0_blocks.iter() {
             f0 = block.forward(&f0, style);
-            println!("F0 block {} output shape: {:?}", i, f0.shape());
         }
-        
+
         // Noise prediction branch
         let mut noise = shared_bct.clone();
-        for (i, block) in self.noise_blocks.iter().enumerate() {
+        for block in self.noise_blocks.iter() {
             noise = block.forward(&noise, style);
-            println!("Noise block {} output shape: {:?}", i, noise.shape());
         }
 
         // Apply projections
         let f0_proj_out = self.f0_proj.forward(&f0);
         let noise_proj_out = self.noise_proj.forward(&noise);
 
-        // STRICT: Validate projection outputs
-        assert_eq!(f0_proj_out.shape(), &[batch_size, 1, frames],
-            "STRICT: F0 projection output shape mismatch");
-        assert_eq!(noise_proj_out.shape(), &[batch_size, 1, frames], 
-            "STRICT: Noise projection output shape mismatch");
+        let upsampled_frames = f0_proj_out.shape()[2];
 
-        // Squeeze dimension 1: [B, 1, F] → [B, F]
+        assert_eq!(
+            f0_proj_out.shape(),
+            &[batch_size, 1, upsampled_frames],
+            "STRICT: F0 projection output shape mismatch"
+        );
+        assert_eq!(
+            noise_proj_out.shape(),
+            &[batch_size, 1, upsampled_frames],
+            "STRICT: Noise projection output shape mismatch (F0 had {} frames, noise has {})",
+            upsampled_frames,
+            noise_proj_out.shape()[2]
+        );
+
+        // Squeeze dimension 1: [B, 1, F'] → [B, F']
         let f0_squeezed = self.squeeze_dim1_strict(&f0_proj_out)?;
         let noise_squeezed = self.squeeze_dim1_strict(&noise_proj_out)?;
 
@@ -471,8 +436,6 @@ impl LoadWeightsBinary for ProsodyPredictor {
         component: &str,
         prefix: &str
     ) -> Result<(), FerroError> {
-        println!("Loading ProsodyPredictor weights for {}.{}", component, prefix);
-        
         // STRICT: Load Duration Encoder weights - fail immediately if missing
         self.txt_enc.load_weights_binary(loader, component, &format!("{}.text_encoder", prefix))
             .map_err(|e| FerroError::new(format!("CRITICAL: DurationEncoder loading failed: {}", e)))?;
@@ -512,7 +475,6 @@ impl LoadWeightsBinary for ProsodyPredictor {
         self.noise_proj.load_weights_binary(loader, component, &format!("{}.N_proj", prefix))
             .map_err(|e| FerroError::new(format!("CRITICAL: Noise projection loading failed: {}", e)))?;
         
-        println!("✅ ProsodyPredictor: All 122 weight tensors loaded successfully with STRICT validation");
         Ok(())
     }
 }

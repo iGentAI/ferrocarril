@@ -1,7 +1,12 @@
 //! Layer normalization implementation for ALBERT
-//! 
+//!
 //! This implements layer normalization with trainable parameters for
-//! scaling (gamma) and shifting (beta).
+//! scaling (gamma) and shifting (beta). The forward pass uses direct
+//! slice access over the last-dim `hidden` slice of the input, with
+//! three contiguous passes per row (sum → mean, squared-deviation →
+//! variance, scale+shift), which LLVM auto-vectorises.
+
+#![allow(dead_code)]
 
 use ferrocarril_core::tensor::Tensor;
 use ferrocarril_core::{Parameter, LoadWeightsBinary, FerroError};
@@ -22,17 +27,15 @@ pub struct LayerNorm {
 impl LayerNorm {
     /// Create a new layer normalization module
     pub fn new(hidden_size: usize, eps: f32) -> Self {
-        // Initialize gamma to ones and beta to zeros
         let gamma = Parameter::new(Tensor::from_data(
             vec![1.0; hidden_size],
-            vec![hidden_size]
+            vec![hidden_size],
         ));
-        
         let beta = Parameter::new(Tensor::from_data(
             vec![0.0; hidden_size],
-            vec![hidden_size]
+            vec![hidden_size],
         ));
-        
+
         Self {
             hidden_size,
             gamma,
@@ -40,107 +43,72 @@ impl LayerNorm {
             eps,
         }
     }
-    
-    /// Apply layer normalization to input tensor
-    /// 
-    /// Input shape: [batch_size, seq_len, hidden_size] or [batch_size, hidden_size]
-    /// Output shape: Same as input
+
+    /// Apply layer normalization to input tensor.
+    ///
+    /// Supports both 2D `[B, H]` and 3D `[B, T, H]` (or any rank where
+    /// the last dim is the normalisation axis). Normalises each
+    /// `hidden`-length row independently.
     pub fn forward(&self, x: &Tensor<f32>) -> Tensor<f32> {
         let shape = x.shape();
-        
-        // Layer norm applies along the last dimension (hidden_size)
-        // Get the actual hidden dimension from the input tensor
-        let actual_hidden_size = *shape.last().unwrap();
-        let gamma_size = self.gamma.data().shape()[0];
-        let beta_size = self.beta.data().shape()[0];
-        
-        // Get the minimum size to avoid index out of bounds
-        let norm_size = actual_hidden_size.min(gamma_size).min(beta_size);
-        
-        println!("LayerNorm: input shape={:?}, expected hidden_size={}, actual={}, gamma={}, beta={}, using={}",
-            shape, self.hidden_size, actual_hidden_size, gamma_size, beta_size, norm_size);
-        
-        // Handle both 2D and 3D inputs
-        match shape.len() {
-            2 => {
-                // Input is [batch_size, hidden_size]
-                let batch_size = shape[0];
-                let mut output_data = vec![0.0; batch_size * actual_hidden_size];
-                
-                for b in 0..batch_size {
-                    // Calculate mean
-                    let mut mean = 0.0;
-                    for h in 0..actual_hidden_size {
-                        mean += x[&[b, h]];
-                    }
-                    mean /= actual_hidden_size as f32;
-                    
-                    // Calculate variance
-                    let mut variance = 0.0;
-                    for h in 0..actual_hidden_size {
-                        variance += (x[&[b, h]] - mean).powi(2);
-                    }
-                    variance /= actual_hidden_size as f32;
-                    
-                    // Apply normalization, scaling, and shifting
-                    for h in 0..actual_hidden_size {
-                        let idx = b * actual_hidden_size + h;
-                        // For values within gamma/beta range, apply normalization
-                        if h < norm_size {
-                            output_data[idx] = (x[&[b, h]] - mean) / (variance + self.eps).sqrt() 
-                                * self.gamma.data()[&[h]] + self.beta.data()[&[h]];
-                        } else {
-                            // For values outside gamma/beta range, just keep the normalized value
-                            output_data[idx] = (x[&[b, h]] - mean) / (variance + self.eps).sqrt();
-                        }
-                    }
-                }
-                
-                Tensor::from_data(output_data, vec![batch_size, actual_hidden_size])
-            },
-            3 => {
-                // Input is [batch_size, seq_len, hidden_size]
-                let batch_size = shape[0];
-                let seq_len = shape[1];
-                let mut output_data = vec![0.0; batch_size * seq_len * actual_hidden_size];
-                
-                for b in 0..batch_size {
-                    for s in 0..seq_len {
-                        // Calculate mean
-                        let mut mean = 0.0;
-                        for h in 0..actual_hidden_size {
-                            mean += x[&[b, s, h]];
-                        }
-                        mean /= actual_hidden_size as f32;
-                        
-                        // Calculate variance
-                        let mut variance = 0.0;
-                        for h in 0..actual_hidden_size {
-                            variance += (x[&[b, s, h]] - mean).powi(2);
-                        }
-                        variance /= actual_hidden_size as f32;
-                        
-                        // Apply normalization, scaling, and shifting
-                        for h in 0..actual_hidden_size {
-                            let idx = (b * seq_len + s) * actual_hidden_size + h;
-                            // For values within gamma/beta range, apply normalization
-                            if h < norm_size {
-                                output_data[idx] = (x[&[b, s, h]] - mean) / (variance + self.eps).sqrt() 
-                                    * self.gamma.data()[&[h]] + self.beta.data()[&[h]];
-                            } else {
-                                // For values outside gamma/beta range, just keep the normalized value
-                                output_data[idx] = (x[&[b, s, h]] - mean) / (variance + self.eps).sqrt();
-                            }
-                        }
-                    }
-                }
-                
-                Tensor::from_data(output_data, vec![batch_size, seq_len, actual_hidden_size])
-            },
-            _ => {
-                panic!("LayerNorm expects 2D or 3D input, got shape: {:?}", shape);
+        assert!(
+            !shape.is_empty(),
+            "LayerNorm: expected at least 1D input, got {:?}",
+            shape
+        );
+
+        let hidden = *shape.last().unwrap();
+        assert_eq!(
+            hidden,
+            self.gamma.data().shape()[0],
+            "LayerNorm: input last-dim {} does not match configured hidden_size {}",
+            hidden,
+            self.gamma.data().shape()[0]
+        );
+
+        let gamma = self.gamma.data().data();
+        let beta = self.beta.data().data();
+        let x_data = x.data();
+        let eps = self.eps;
+        let inv_h = 1.0f32 / hidden as f32;
+
+        let num_rows = x_data.len() / hidden;
+        debug_assert_eq!(num_rows * hidden, x_data.len());
+
+        let mut out = vec![0.0f32; x_data.len()];
+
+        for row in 0..num_rows {
+            let start = row * hidden;
+            let in_row = &x_data[start..start + hidden];
+            let out_row = &mut out[start..start + hidden];
+
+            // Pass 1: sum → mean
+            let mut sum = 0.0f32;
+            for &v in in_row {
+                sum += v;
+            }
+            let mean = sum * inv_h;
+
+            // Pass 2: sum of squared deviations → variance → inv_std
+            let mut sq_sum = 0.0f32;
+            for &v in in_row {
+                let d = v - mean;
+                sq_sum += d * d;
+            }
+            let var = sq_sum * inv_h;
+            let inv_std = 1.0f32 / (var + eps).sqrt();
+
+            // Pass 3: fused normalise + affine
+            //   y = (x - mean) * inv_std * gamma + beta
+            //     = x * (inv_std * gamma) + (beta - mean * inv_std * gamma)
+            //     = x * scale + offset   (but we keep the explicit form
+            //                             since gamma/beta vary per channel)
+            for (i, &v) in in_row.iter().enumerate() {
+                out_row[i] = (v - mean) * inv_std * gamma[i] + beta[i];
             }
         }
+
+        Tensor::from_data(out, shape.to_vec())
     }
 }
 
@@ -151,50 +119,24 @@ impl LoadWeightsBinary for LayerNorm {
         component_path: &str,
         module_path: &str,
     ) -> Result<(), FerroError> {
-        println!("Loading LayerNorm weights for component={}, module={}", component_path, module_path);
-        
-        // Load gamma weights (weight)
-        let gamma_path = format!(
-            "{}.{}.LayerNorm.weight",
-            component_path,
-            module_path
-        );
+        // Load gamma weights (weight). Try the LayerNorm-suffixed key
+        // first and fall back to the bare `.weight` key.
+        let gamma_path = format!("{}.{}.LayerNorm.weight", component_path, module_path);
         if let Ok(gamma) = loader.load_tensor(&gamma_path) {
-            println!("Loaded gamma from {} with shape {:?}", gamma_path, gamma.shape());
             *self.gamma.data_mut() = gamma;
         } else {
-            // Try alternative path format
-            let alt_gamma_path = format!(
-                "{}.{}.weight",
-                component_path,
-                module_path
-            );
-            println!("Trying alternative gamma path: {}", alt_gamma_path);
+            let alt_gamma_path = format!("{}.{}.weight", component_path, module_path);
             *self.gamma.data_mut() = loader.load_tensor(&alt_gamma_path)?;
-            println!("Loaded gamma from {} with shape {:?}", alt_gamma_path, self.gamma.data().shape());
         }
-        
-        // Load beta weights (bias)
-        let beta_path = format!(
-            "{}.{}.LayerNorm.bias",
-            component_path,
-            module_path
-        );
+
+        let beta_path = format!("{}.{}.LayerNorm.bias", component_path, module_path);
         if let Ok(beta) = loader.load_tensor(&beta_path) {
-            println!("Loaded beta from {} with shape {:?}", beta_path, beta.shape());
             *self.beta.data_mut() = beta;
         } else {
-            // Try alternative path format
-            let alt_beta_path = format!(
-                "{}.{}.bias",
-                component_path,
-                module_path
-            );
-            println!("Trying alternative beta path: {}", alt_beta_path);
+            let alt_beta_path = format!("{}.{}.bias", component_path, module_path);
             *self.beta.data_mut() = loader.load_tensor(&alt_beta_path)?;
-            println!("Loaded beta from {} with shape {:?}", alt_beta_path, self.beta.data().shape());
         }
-        
+
         Ok(())
     }
 }

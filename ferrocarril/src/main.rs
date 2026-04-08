@@ -6,7 +6,6 @@ use ferrocarril_core::{Config, tensor::Tensor, PhonesisG2P};
 use ferrocarril_dsp;
 use ferrocarril_nn::vocoder::{Generator, Decoder};
 use std::error::Error;
-use std::path::Path;
 use clap::{Parser, Subcommand};
 use crate::model::FerroModel;
 
@@ -21,22 +20,30 @@ struct Cli {
 enum Commands {
     /// Run inference on text
     Infer {
-        /// Text to synthesize
-        #[arg(short, long)]
-        text: String,
-        
+        /// Text to synthesize (will be converted to phonemes via the
+        /// built-in phonesis G2P). Mutually exclusive with `--phonemes`.
+        #[arg(short, long, conflicts_with = "phonemes", required_unless_present = "phonemes")]
+        text: Option<String>,
+
+        /// Pre-computed phoneme string (IPA) to synthesize, bypassing
+        /// the built-in G2P. Use this if you have a correct phoneme
+        /// string from misaki or another Kokoro-compatible G2P and
+        /// want to skip phonesis. Mutually exclusive with `--text`.
+        #[arg(short = 'p', long, conflicts_with = "text", required_unless_present = "text")]
+        phonemes: Option<String>,
+
         /// Output WAV file path
         #[arg(short, long)]
         output: String,
-        
+
         /// Model path for binary weights (optional)
         #[arg(short, long)]
         model: Option<String>,
-        
+
         /// Voice name (optional)
         #[arg(short, long)]
         voice: Option<String>,
-        
+
         /// Speech speed factor (optional, default: 1.0)
         #[arg(short, long, default_value = "1.0")]
         speed: f32,
@@ -49,10 +56,13 @@ fn main() -> Result<(), Box<dyn Error>> {
     let cli = Cli::parse();
     
     match cli.command {
-        Some(Commands::Infer { text, output, model, voice, speed }) => {
-            // Load configuration
-            let config = Config::from_json("config.json")?;
-            
+        Some(Commands::Infer { text, phonemes, output, model, voice, speed }) => {
+            let config_path = match &model {
+                Some(model_path) => format!("{}/config.json", model_path),
+                None => "config.json".to_string(),
+            };
+            let config = Config::from_json(&config_path)?;
+
             // Load model
             let model = match model {
                 Some(model_path) => {
@@ -65,24 +75,37 @@ fn main() -> Result<(), Box<dyn Error>> {
                         return Err("Binary weight loading requires the 'weights' feature".into());
                     }
                 }
-                None => FerroModel::load("config.json", config)?
+                None => FerroModel::load(&config_path, config)?,
             };
-            
-            // Perform inference
-            let audio_data = match voice {
-                Some(voice_name) => {
+
+            let audio_data = match (phonemes, text, voice) {
+                (Some(p), _, Some(voice_name)) => {
                     let voice_embedding = model.load_voice(&voice_name)?;
-                    model.infer_with_voice(&text, &voice_embedding, speed)?
+                    model.infer_with_phonemes(&p, &voice_embedding, speed)?
                 }
-                None => model.infer(&text)?
+                (Some(p), _, None) => {
+                    let default_voice = Tensor::from_data(
+                        vec![0.0; 256],
+                        vec![1, 256],
+                    );
+                    model.infer_with_phonemes(&p, &default_voice, speed)?
+                }
+                (None, Some(t), Some(voice_name)) => {
+                    let voice_embedding = model.load_voice(&voice_name)?;
+                    model.infer_with_voice(&t, &voice_embedding, speed)?
+                }
+                (None, Some(t), None) => model.infer(&t)?,
+                (None, None, _) => unreachable!(
+                    "clap schema enforces exactly one of --text or --phonemes"
+                ),
             };
-            
+
             // Create audio tensor
             let audio_tensor = Tensor::from_data(audio_data.clone(), vec![audio_data.len()]);
-            
+
             // Save WAV file
             ferrocarril_dsp::save_wav(&audio_tensor, &output)?;
-            
+
             println!("Audio generated and saved to: {}", output);
         }
         Some(Commands::Demo) => {

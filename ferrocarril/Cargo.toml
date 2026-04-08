@@ -10,8 +10,8 @@ license = "MIT"
 members = [
     "ferrocarril-core",
     "ferrocarril-dsp",
-    "ferrocarril-nn"
-    # Removed redundant ferrocarril-g2p-adapter
+    "ferrocarril-nn",
+    "ferrocarril-wasm",
 ]
 
 [features]

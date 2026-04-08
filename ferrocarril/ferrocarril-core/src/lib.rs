@@ -79,19 +79,25 @@ pub struct PlbertConfig {
 }
 
 impl Config {
+    /// Load a `Config` from a JSON file path. This is a thin wrapper
+    /// around [`Config::from_json_str`] that reads the file contents
+    /// first. For environments without a filesystem (e.g. WebAssembly),
+    /// use `from_json_str` directly with an already-loaded string.
     pub fn from_json(path: &str) -> Result<Self, Box<dyn Error>> {
-        // Implement actual JSON parsing instead of hardcoded values
         use std::fs::File;
         use std::io::Read;
-        
+
         let mut file = File::open(path)?;
         let mut contents = String::new();
         file.read_to_string(&mut contents)?;
+        Self::from_json_str(&contents)
+    }
+
+    /// Parse a `Config` directly from a JSON string. Performs no
+    /// filesystem I/O and is safe to call from WebAssembly.
+    pub fn from_json_str(json: &str) -> Result<Self, Box<dyn Error>> {
+        let config: serde_json::Value = serde_json::from_str(json)?;
         
-        // Use serde_json to parse the JSON file
-        let config: serde_json::Value = serde_json::from_str(&contents)?;
-        
-        // Extract values from the JSON
         let n_token = config["n_token"].as_u64().unwrap_or(150) as usize;
         let hidden_dim = config["hidden_dim"].as_u64().unwrap_or(512) as usize;
         let n_layer = config["n_layer"].as_u64().unwrap_or(4) as usize;
@@ -152,8 +158,8 @@ impl Config {
         let mut vocab = std::collections::HashMap::new();
         if let Some(vocab_obj) = config["vocab"].as_object() {
             for (key, value) in vocab_obj {
-                if key.len() == 1 {
-                    let ch = key.chars().next().unwrap();
+                let mut chars = key.chars();
+                if let (Some(ch), None) = (chars.next(), chars.next()) {
                     let id = value.as_u64().unwrap_or(0) as usize;
                     vocab.insert(ch, id);
                 }
@@ -237,6 +243,7 @@ impl Parameter {
 /// Phonesis-based G2P component for Ferrocarril
 pub struct PhonesisG2P {
     inner: Arc<Mutex<dyn GraphemeToPhoneme + Send + Sync>>,
+    #[allow(dead_code)]
     language: String,
     standard: PhonemeStandard,
 }
@@ -248,7 +255,7 @@ impl PhonesisG2P {
             "en" | "en-us" | "en-gb" => {
                 let options = G2POptions {
                     handle_stress: true,
-                    default_standard: PhonemeStandard::ARPABET,
+                    default_standard: PhonemeStandard::IPA,
                     fallback_strategy: FallbackStrategy::UseRules,
                 };
                 
@@ -258,7 +265,7 @@ impl PhonesisG2P {
                 Ok(Self {
                     inner: Arc::new(Mutex::new(g2p)),
                     language: language.to_string(),
-                    standard: PhonemeStandard::ARPABET,
+                    standard: PhonemeStandard::IPA,
                 })
             },
             _ => Err(FerroError::new(format!("Unsupported language: {}", language))),
@@ -270,10 +277,10 @@ impl PhonesisG2P {
         let inner = self.inner.lock()
             .map_err(|e| FerroError::new(format!("Failed to lock G2P: {}", e)))?;
     
-        // First try regular conversion with the default strategy
-        match inner.convert_to_standard(text, self.standard) {
+        // First try regular conversion with the default strategy.
+        let result = match inner.convert_to_standard(text, self.standard) {
             Ok(phonemes) => {
-                Ok(phonemes.join(" "))
+                Ok(phonemes.join(""))
             },
             Err(e) => {
                 // If the default strategy fails (for example, UseRules for unknown words),
@@ -291,8 +298,11 @@ impl PhonesisG2P {
                     
                     match fallback_g2p.convert_to_standard(text, self.standard) {
                         Ok(phonemes) => {
-                            println!("Warning: Using grapheme fallback for unknown word(s) in: '{}'", text);
-                            Ok(phonemes.join(" "))
+                            eprintln!(
+                                "ferrocarril: warning: using grapheme fallback for unknown word(s) in: '{}'",
+                                text
+                            );
+                            Ok(phonemes.join(""))
                         },
                         Err(e) => {
                             // If even the fallback fails, propagate the error
@@ -304,6 +314,24 @@ impl PhonesisG2P {
                     Err(FerroError::new(format!("G2P conversion error: {}", e)))
                 }
             }
+        };
+
+        if std::env::var("FERRO_DEBUG_G2P").is_ok() {
+            if let Ok(ref p) = result {
+                let non_ws: String = p.chars().filter(|c| !c.is_whitespace()).collect();
+                eprintln!(
+                    "[ferro-g2p] input: {:?}",
+                    text
+                );
+                eprintln!(
+                    "[ferro-g2p] output: ({} non-ws chars, {} bytes) {:?}",
+                    non_ws.chars().count(),
+                    p.len(),
+                    p
+                );
+            }
         }
+
+        result
     }
 }

@@ -1,0 +1,21 @@
+# Per-target Rust compiler flags.
+#
+# `target-cpu=native` lets LLVM emit the full instruction set of the
+# host CPU. On modern Intel server parts (Skylake-X, Ice Lake,
+# Sapphire Rapids and newer) this enables AVX-512; on older hosts
+# AVX2/FMA; on the default stable target only SSE2.
+#
+# This flag matters for the auto-vectorised scalar-fallback inner
+# loops in `ops::matmul::matmul_f32_scalar` and `linear_f32_scalar`,
+# and for the surrounding glue / scalar-tail code in the hot
+# kernels. The explicit AVX-512 micro-kernels in
+# `ops::matmul::matmul_f32_avx512_serial` and `linear_f32_avx512`
+# are gated on `#[target_feature(enable = "avx512f")]` and run
+# regardless of this file — they're guarded at runtime by
+# `is_x86_feature_detected!("avx512f")`.
+#
+# Scoped to the native x86_64 target only — the wasm32 build has
+# its own SIMD story (via `target-feature=+simd128`) and is not
+# affected by this file.
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-C", "target-cpu=native"]

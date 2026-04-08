@@ -9,40 +9,41 @@ use crate::error::G2PError;
 lazy_static::lazy_static! {
     static ref ARPABET_TO_IPA: HashMap<&'static str, &'static str> = {
         let mut m = HashMap::new();
-        // Vowels
+        // Vowels (stress-context-free; AH and ER are stress-dependent
+        // and handled inline in `Phoneme::to_string_in`)
         m.insert("AA", "ɑ");
         m.insert("AE", "æ");
-        m.insert("AH", "ʌ");
         m.insert("AO", "ɔ");
-        m.insert("AW", "aʊ");
         m.insert("AX", "ə");
-        m.insert("AY", "aɪ");
         m.insert("EH", "ɛ");
-        m.insert("ER", "ɝ");
-        m.insert("EY", "eɪ");
         m.insert("IH", "ɪ");
         m.insert("IY", "i");
-        m.insert("OW", "oʊ");
-        m.insert("OY", "ɔɪ");
         m.insert("UH", "ʊ");
         m.insert("UW", "u");
-        
+
+        // Diphthongs (Kokoro single-char uppercase tokens)
+        m.insert("AW", "W");   // /aʊ/
+        m.insert("AY", "I");   // /aɪ/
+        m.insert("EY", "A");   // /eɪ/
+        m.insert("OW", "O");   // /oʊ/
+        m.insert("OY", "Y");   // /ɔɪ/
+
         // Consonants
         m.insert("B", "b");
-        m.insert("CH", "tʃ");
+        m.insert("CH", "ʧ");
         m.insert("D", "d");
         m.insert("DH", "ð");
         m.insert("F", "f");
-        m.insert("G", "g");
+        m.insert("G", "ɡ");
         m.insert("HH", "h");
-        m.insert("JH", "dʒ");
+        m.insert("JH", "ʤ");
         m.insert("K", "k");
         m.insert("L", "l");
         m.insert("M", "m");
         m.insert("N", "n");
         m.insert("NG", "ŋ");
         m.insert("P", "p");
-        m.insert("R", "r");
+        m.insert("R", "ɹ");
         m.insert("S", "s");
         m.insert("SH", "ʃ");
         m.insert("T", "t");
@@ -232,9 +233,20 @@ impl Phoneme {
         
         match (self.standard, target_standard) {
             (PhonemeStandard::ARPABET, PhonemeStandard::IPA) => {
-                let base_ipa = ARPABET_TO_IPA.get(self.symbol.as_str())
-                    .map(|s| s.to_string())
-                    .unwrap_or_else(|| self.symbol.clone());
+                let stressed = matches!(
+                    self.stress,
+                    Some(StressLevel::Primary) | Some(StressLevel::Secondary)
+                );
+                let base_ipa: String = match (self.symbol.as_str(), stressed) {
+                    ("AH", false) => "ə".to_string(),
+                    ("AH", true)  => "ʌ".to_string(),
+                    ("ER", false) => "əɹ".to_string(),
+                    ("ER", true)  => "ɜɹ".to_string(),
+                    (sym, _) => ARPABET_TO_IPA
+                        .get(sym)
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| self.symbol.clone()),
+                };
                 
                 // Add stress mark if needed
                 if let Some(stress) = self.stress {
@@ -300,19 +312,21 @@ impl Phoneme {
             },
             _ => {
                 // If it's IPA, try to classify
-                if symbol.len() == 1 {
-                    match symbol {
-                        "ɑ" | "æ" | "ʌ" | "ɔ" | "ə" | "ɛ" | "ɝ" | "ɪ" | "i" | "ʊ" | "u" => {
-                            PhonemeType::Vowel
-                        },
-                        "b" | "d" | "ð" | "f" | "g" | "h" | "k" | "l" | "m" | "n" | "ŋ" | 
-                        "p" | "r" | "s" | "ʃ" | "t" | "θ" | "v" | "w" | "j" | "z" | "ʒ" => {
-                            PhonemeType::Consonant
-                        },
-                        _ => PhonemeType::Special
+                if symbol.chars().count() == 1 {
+                    match symbol.chars().next().unwrap() {
+                        'ɑ' | 'æ' | 'ʌ' | 'ɔ' | 'ə' | 'ɛ' | 'ɝ' | 'ɜ'
+                        | 'ɪ' | 'i' | 'ʊ' | 'u' => PhonemeType::Vowel,
+                        'A' | 'I' | 'O' | 'W' | 'Y' => PhonemeType::Diphthong,
+                        'b' | 'd' | 'ð' | 'f' | 'ɡ' | 'g' | 'h' | 'k'
+                        | 'l' | 'm' | 'n' | 'ŋ' | 'p' | 'ɹ' | 'r'
+                        | 's' | 'ʃ' | 't' | 'θ' | 'v' | 'w' | 'j'
+                        | 'z' | 'ʒ' | 'ʧ' | 'ʤ' => PhonemeType::Consonant,
+                        _ => PhonemeType::Special,
                     }
-                } else if symbol.len() > 1 {
-                    if symbol.contains(|c: char| "aeiouæɑəɛɪɔʊʌ".contains(c)) {
+                } else if symbol.chars().count() > 1 {
+                    if symbol.contains(|c: char| {
+                        "aeiouæɑəɛɝɜɪɔʊʌAIOWY".contains(c)
+                    }) {
                         PhonemeType::Vowel
                     } else {
                         PhonemeType::Consonant

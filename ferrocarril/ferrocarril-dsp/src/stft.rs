@@ -69,6 +69,7 @@ pub struct CustomSTFT {
     cfg: StftConfig,
     n_fft: usize,
     freq_bins: usize,
+    #[allow(dead_code)]
     window: Vec<f32>, // length == n_fft
 
     // (out, in=1, k) so they can directly be used as conv kernels

@@ -8,43 +8,6 @@ use crate::{conv::Conv1d, lstm::LSTM, Forward, Parameter};
 use ferrocarril_core::tensor::Tensor;
 use std::sync::Arc;
 
-/// Helper function for applying a mask to a tensor - STRICT VERSION
-fn mask_fill_strict(x: &mut Tensor<f32>, mask: &Tensor<bool>, value: f32) {
-    // STRICT: Verify compatible shapes exactly - no adaptive behavior
-    assert_eq!(x.shape()[0], mask.shape()[0], 
-        "STRICT: Batch dimension mismatch - tensor: {}, mask: {}", x.shape()[0], mask.shape()[0]);
-    
-    // For [B, T, C] tensor with [B, T] mask
-    if x.shape().len() == 3 && x.shape()[1] == mask.shape()[1] {
-        // Apply mask
-        for b in 0..mask.shape()[0] {
-            for t in 0..mask.shape()[1] {
-                if mask[&[b, t]] {
-                    for c in 0..x.shape()[2] {
-                        x[&[b, t, c]] = value;
-                    }
-                }
-            }
-        }
-    } 
-    // For [B, C, T] tensor with [B, T] mask
-    else if x.shape().len() == 3 && x.shape()[2] == mask.shape()[1] {
-        // Apply mask
-        for b in 0..mask.shape()[0] {
-            for t in 0..mask.shape()[1] {
-                if mask[&[b, t]] {
-                    for c in 0..x.shape()[1] {
-                        x[&[b, c, t]] = value;
-                    }
-                }
-            }
-        }
-    } else {
-        panic!("STRICT: Incompatible tensor shapes for mask_fill - tensor: {:?}, mask: {:?}", 
-               x.shape(), mask.shape());
-    }
-}
-
 // -------------------------------------------------
 // Helper: embedding (gather along 0-th dim)
 // -------------------------------------------------
@@ -114,39 +77,41 @@ impl LayerNorm {
         // STRICT: Validate input shape exactly
         assert_eq!(input.shape().len(), 3,
             "STRICT: LayerNorm input must be 3D [batch, channels, time], got: {:?}", input.shape());
-            
+
         let (b, c, t) = (input.shape()[0], input.shape()[1], input.shape()[2]);
         let mut out = vec![0.0; b * c * t];
 
         // STRICT: Validate channels match layer configuration
         assert_eq!(c, self.gamma.data().shape()[0],
-            "STRICT: Input channels {} don't match LayerNorm channels {}", 
+            "STRICT: Input channels {} don't match LayerNorm channels {}",
             c, self.gamma.data().shape()[0]);
 
+        let g_data = self.gamma.data();
+        let b_data = self.beta.data();
+        let inv_c = 1.0_f32 / c as f32;
+
         for batch in 0..b {
-            for ch in 0..c {
-                // mean & variance across time dimension
-                let mut mean = 0.0;
-                let mut var  = 0.0;
-                let base_idx = batch * c * t + ch * t;
-                for pos in 0..t {
+            for pos in 0..t {
+                let mut mean = 0.0_f32;
+                let mut sq_sum = 0.0_f32;
+                for ch in 0..c {
                     let v = input[&[batch, ch, pos]];
                     mean += v;
-                    var  += v * v;
+                    sq_sum += v * v;
                 }
-                mean /= t as f32;
-                var  = var / t as f32 - mean * mean;
-
+                mean *= inv_c;
+                let var = sq_sum * inv_c - mean * mean;
                 let denom = (var + self.eps).sqrt();
-                let g = self.gamma.data()[&[ch]];
-                let b_ = self.beta.data()[&[ch]];
 
-                for pos in 0..t {
+                for ch in 0..c {
                     let v = input[&[batch, ch, pos]];
-                    out[base_idx + pos] = (v - mean) / denom * g + b_;
+                    let g = g_data[&[ch]];
+                    let bb = b_data[&[ch]];
+                    out[batch * c * t + ch * t + pos] = (v - mean) / denom * g + bb;
                 }
             }
         }
+
         Tensor::from_data(out, vec![b, c, t])
     }
 }
@@ -287,7 +252,7 @@ impl TextEncoder {
         let mut x_bct = self.transpose_btc_to_bct_strict(&x);        
 
         // 3. CNN processing with masking after each layer
-        for (i, blk) in self.cnn.iter().enumerate() {
+        for (_i, blk) in self.cnn.iter().enumerate() {
             x_bct = blk.forward(&x_bct);
             
             // Apply mask after each CNN block
@@ -396,8 +361,6 @@ impl TextEncoder {
         &mut self, 
         loader: &ferrocarril_core::weights_binary::BinaryWeightLoader
     ) -> Result<(), ferrocarril_core::FerroError> {
-        println!("Loading TextEncoder weights from binary loader...");
-        
         // Component name must be "text_encoder" to match the output structure from the weight converter
         let component = "text_encoder";
         
@@ -411,12 +374,9 @@ impl TextEncoder {
             "STRICT: Embedding weight shape mismatch");
             
         self.embedding.weight = Parameter::new(embedding_weight);
-        println!("✅ Embedding weights loaded: shape {:?}", self.embedding.weight.data().shape());
         
         // STRICT: Load CNN blocks - fail immediately if any missing
         for i in 0..self.cnn.len() {
-            println!("Loading CNN block {}", i);
-            
             // Skip blocks beyond what exists in the weights - but be explicit about this
             if i >= 3 {
                 return Err(ferrocarril_core::FerroError::new(format!(
@@ -462,12 +422,9 @@ impl TextEncoder {
             
             block.ln.gamma = Parameter::new(gamma);
             block.ln.beta = Parameter::new(beta);
-            
-            println!("✅ CNN block {} loaded successfully", i);
         }
         
         // STRICT: Load bidirectional LSTM weights - fail immediately if missing
-        println!("Loading bidirectional LSTM weights...");
         
         // Forward direction weights
         let forward_weight_ih = loader.load_component_parameter(component, "module.lstm.weight_ih_l0")
@@ -499,8 +456,6 @@ impl TextEncoder {
         self.lstm.bias_ih_l0_reverse = Parameter::new(backward_bias_ih);
         self.lstm.bias_hh_l0_reverse = Parameter::new(backward_bias_hh);
         
-        println!("✅ Bidirectional LSTM weights loaded successfully");
-        println!("✅ TextEncoder weights loaded with STRICT validation - no fallbacks!");
         Ok(())
     }
 }

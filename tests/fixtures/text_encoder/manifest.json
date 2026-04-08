@@ -1,0 +1,25 @@
+{
+  "repo_id": "hexgrad/Kokoro-82M",
+  "pth_file": "kokoro-v1_0.pth",
+  "input_ids": [
+    [
+      0,
+      50,
+      86,
+      54,
+      59,
+      135,
+      0
+    ]
+  ],
+  "output_shape": [
+    1,
+    512,
+    7
+  ],
+  "fixture_files": [
+    "input_ids.npy",
+    "output.npy",
+    "text_mask.npy"
+  ]
+}

@@ -1,0 +1,25 @@
+[package]
+name = "ferrocarril-wasm"
+version = "0.1.0"
+edition = "2021"
+authors = ["Ferrocarril Developers"]
+description = "WebAssembly bindings for Ferrocarril TTS"
+license = "MIT"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+ferrocarril = { path = ".." }
+# Pinned to `=0.2.100` because the wasm-bindgen macro schema is
+# versioned and must match the installed `wasm-bindgen-cli` exactly.
+# If you upgrade the CLI, bump both here and in the toolchain.
+wasm-bindgen = "=0.2.100"
+
+[features]
+default = ["weights"]
+weights = ["ferrocarril/weights"]
+
+# Note: `[profile.*]` sections in a workspace member manifest are
+# ignored by Cargo. Release optimisation for the wasm artefact is
+# controlled by the workspace root manifest in `../Cargo.toml`.

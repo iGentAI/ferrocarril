@@ -14,6 +14,8 @@
 //!      output: [T, B, hidden_size * (2 if bidirectional else 1)]
 //!      hN, cN: [B, hidden_size * (2 if bidirectional else 1)]
 
+#![allow(dead_code)]
+
 use crate::{Forward, Parameter};
 use ferrocarril_core::tensor::Tensor;
 use ferrocarril_core::FerroError;
@@ -132,25 +134,29 @@ impl LSTM {
         debug_assert_eq!(c_t.len(), self.hidden_size);
         debug_assert_eq!(gate_buf.len(), 4 * self.hidden_size);
 
-        // ---- gate = W_ih * x  +  W_hh * h  +  b_ih + b_hh ----------------
-        // plain scalar code, but contiguous memory allows the compiler to
-        // vectorise automatically (–O3)
-        for g in 0..4 * self.hidden_size {
-            let mut sum = 0.0;
+        let ih_data = weights_ih.data();
+        let hh_data = weights_hh.data();
+        let ih_bias = bias_ih.data();
+        let hh_bias = bias_hh.data();
 
-            // dot(x_t, w_ih[g])
-            for i in 0..self.input_size {
-                sum += weights_ih[&[g, i]] * x_t[i];
+        let input_size = self.input_size;
+        let hidden_size = self.hidden_size;
+        let gate_total = 4 * hidden_size;
+
+        // ---- gate = W_ih * x + W_hh * h + b_ih + b_hh --------------------
+        for g in 0..gate_total {
+            let w_ih_row = &ih_data[g * input_size..(g + 1) * input_size];
+            let w_hh_row = &hh_data[g * hidden_size..(g + 1) * hidden_size];
+
+            let mut sum = ih_bias[g] + hh_bias[g];
+
+            for i in 0..input_size {
+                sum += w_ih_row[i] * x_t[i];
             }
-            // dot(h_t, w_hh[g])
-            for i in 0..self.hidden_size {
-                sum += weights_hh[&[g, i]] * h_t[i];
+            for i in 0..hidden_size {
+                sum += w_hh_row[i] * h_t[i];
             }
 
-            // bias
-            sum += bias_ih[&[g]];
-            sum += bias_hh[&[g]];
-            
             gate_buf[g] = sum;
         }
 
@@ -444,13 +450,8 @@ impl LSTM {
         
         let (seq_len, batch, feat) = (shape[0], shape[1], shape[2]);
         
-        // Check for dimension mismatch
-        if feat != self.input_size {
-            println!("Warning: Input feature dimension {} does not match LSTM input_size {}. Will adapt after conversion to batch-first format.",
-                     feat, self.input_size);
-        }
-        
-        // Convert time-major to batch-first for unified processing
+        // Convert time-major to batch-first for unified processing.
+        // (Dimension mismatches are asserted inside forward_batch_first.)
         let mut input_batch_first_data = vec![0.0; batch * seq_len * feat];
         for t in 0..seq_len {
             for b in 0..batch {
@@ -521,8 +522,6 @@ impl LSTM {
         prefix: &str,
         is_reverse: bool
     ) -> Result<(), FerroError> {
-        println!("Loading LSTM weights for {}.{} (reverse: {})", component, prefix, is_reverse);
-        
         // Determine suffix based on whether this is a reverse LSTM
         let suffix = if is_reverse { "_reverse" } else { "" };
         

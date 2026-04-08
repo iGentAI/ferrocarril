@@ -297,7 +297,13 @@ impl TextNormalizer {
     
     /// Determines if a character is punctuation
     fn is_punctuation(c: char) -> bool {
-        matches!(c, '.' | ',' | '!' | '?' | ':' | ';' | '-' | '"' | '\'' | '(' | ')' | '[' | ']' | '{' | '}')
+        matches!(c,
+            '.' | ',' | '!' | '?' | ':' | ';' | '-' | '"' | '\'' |
+            '(' | ')' | '[' | ']' | '{' | '}' |
+            '\u{2014}' | '\u{2013}' | '\u{2026}' |
+            '\u{201C}' | '\u{201D}' | '\u{2018}' | '\u{2019}' |
+            '\u{00AB}' | '\u{00BB}'
+        )
     }
     
     /// Determines if a token should be kept based on normalizer settings
