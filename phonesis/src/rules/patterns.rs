@@ -278,10 +278,8 @@ impl GraphemePattern {
     
     /// Compile this pattern into an optimized form.
     pub fn compile(&self) -> Result<CompiledPattern, G2PError> {
-        // In a real implementation, this would compile a regex or optimize the pattern
-        // For now, just validate and return a placeholder
+        // Validate regex patterns
         if self.is_regex {
-            // Very basic regex validation
             let open_parens = self.pattern.chars().filter(|&c| c == '(').count();
             let close_parens = self.pattern.chars().filter(|&c| c == ')').count();
             
@@ -299,31 +297,11 @@ impl GraphemePattern {
                     format!("Unbalanced square brackets in regex pattern: {}", self.pattern)
                 ));
             }
-            
-            // Check for special regex characters
-            let has_special_chars = self.pattern.chars().any(|c| {
-                matches!(c, '(' | ')' | '[' | ']' | '*' | '+' | '?')
-            });
-            
-            if !has_special_chars && !self.pattern.contains("\\d") && !self.pattern.contains("\\w") {
-                // Just a literal inside regex
-                Ok(CompiledPattern {
-                    original: self.clone(),
-                    // In a real implementation, this would be an optimized form
-                    optimized: self.pattern.clone(),
-                })
-            } else {
-                Ok(CompiledPattern {
-                    original: self.clone(),
-                    optimized: self.pattern.clone(),
-                })
-            }
-        } else {
-            Ok(CompiledPattern {
-                original: self.clone(),
-                optimized: self.pattern.clone(),
-            })
         }
+        
+        Ok(CompiledPattern {
+            original: self.clone(),
+        })
     }
 }
 
@@ -332,9 +310,6 @@ impl GraphemePattern {
 pub struct CompiledPattern {
     /// The original pattern
     original: GraphemePattern,
-    
-    /// The optimized pattern representation
-    optimized: String,
 }
 
 impl CompiledPattern {
@@ -373,50 +348,6 @@ impl PatternMatcher {
         let compiled = pattern.compile()?;
         self.patterns.push(compiled);
         Ok(())
-    }
-    
-    /// Find the first match of any pattern in this matcher.
-    pub fn find_first(&self, text: &str) -> Option<(usize, usize, Vec<String>)> {
-        // Find the first match of any pattern
-        let mut best_match = None;
-        
-        for pattern in &self.patterns {
-            if let Some((pos, matched)) = pattern.find_all(text)
-                .into_iter()
-                .next() {
-                let end = pos + matched[0].len();
-                let candidate = (pos, end, matched);
-                
-                // Update best match if this is the first one or starts earlier
-                if let Some((best_pos, _, _)) = best_match {
-                    if pos < best_pos {
-                        best_match = Some(candidate);
-                    }
-                } else {
-                    best_match = Some(candidate);
-                }
-            }
-        }
-        
-        best_match
-    }
-    
-    /// Find all matches of all patterns in this matcher.
-    pub fn find_all(&self, text: &str) -> Vec<(usize, usize, Vec<String>)> {
-        // Find all matches of all patterns
-        let mut matches = Vec::new();
-        
-        for pattern in &self.patterns {
-            for (pos, matched) in pattern.find_all(text) {
-                let end = pos + matched[0].len();
-                matches.push((pos, end, matched));
-            }
-        }
-        
-        // Sort by position
-        matches.sort_by_key(|(pos, _, _)| *pos);
-        
-        matches
     }
 }
 
@@ -487,26 +418,6 @@ mod tests {
         assert_eq!(matches.len(), 2);
         assert_eq!(matches[0].0, 1);
         assert_eq!(matches[1].0, 3);
-    }
-    
-    #[test]
-    fn test_pattern_matcher() {
-        let mut matcher = PatternMatcher::new();
-        matcher.add_pattern(GraphemePattern::new("hello")).unwrap();
-        matcher.add_pattern(GraphemePattern::new("world")).unwrap();
-        
-        let text = "hello world";
-        let first_match = matcher.find_first(text);
-        assert!(first_match.is_some());
-        let (pos, end, matched) = first_match.unwrap();
-        assert_eq!(pos, 0);
-        assert_eq!(end, 5);
-        assert_eq!(matched[0], "hello");
-        
-        let all_matches = matcher.find_all(text);
-        assert_eq!(all_matches.len(), 2);
-        assert_eq!(all_matches[0].0, 0); // "hello" starts at 0
-        assert_eq!(all_matches[1].0, 6); // "world" starts at 6
     }
     
     #[test]

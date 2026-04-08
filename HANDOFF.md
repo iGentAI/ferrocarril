@@ -1,4 +1,4 @@
-# Ferrocarril Session Handoff — Phases 1–5 Complete
+# Ferrocarril Session Handoff — Phases 1–6 Complete
 
 > **Read this first when you resume.** It's a self-contained pick-up
 > document and supersedes all earlier handoffs. The canonical long-form
@@ -8,7 +8,7 @@
 > **Phase 3 (numerical correctness) is complete.** Every transformer
 > and vocoder component matches the Python reference within f32
 > precision, and end-to-end audio matches within stochastic envelope
-> tolerance. 24 native tests pass.
+> tolerance. All 173 workspace tests pass at zero warnings.
 >
 > **Phase 4 (cleanup) landed this session.** Production `println!`
 > debug noise was stripped across every load path; real warnings were
@@ -47,10 +47,13 @@ reference within ~1 % global RMS on canonical inputs.
 | `Generator` (iSTFTNet)      | ✅ **VALIDATED** | `tests/decoder_golden_test.rs`            | conv_post RMS 0.75 % drift; global audio RMS 0.002 %–3 % drift  |
 | End-to-end audio path       | ✅ **VALIDATED** | `tests/end_to_end_real_voice_test.rs`     | RMS 0.045599 Rust vs 0.045600 Python on canonical input         |
 
-`cargo test --release --features weights` at end of this session:
-**24 passed / 0 failed / 0 ignored**. All tests use real Kokoro-82M
-weights and either Python-fixture-derived inputs or the real
-`af_heart` voice pack.
+`cargo test --workspace --release --no-fail-fast` at end of this
+session: **173 passed / 0 failed / 0 ignored / 0 warnings** across
+34 test binaries (24 ferrocarril integration tests + 20
+ferrocarril-nn lib unit tests + 129 phonesis lib + integration
+tests). All tests use real Kokoro-82M weights and either
+Python-fixture-derived inputs or the real `af_heart` voice for the
+ferrocarril side, and the vendored CMU dictionary for phonesis.
 
 ### 1.2 Target support matrix
 
@@ -70,7 +73,7 @@ and a real voice:
 $ ./target/release/ferrocarril infer \
     --text "Hello world" \
     --output /tmp/hello_world.wav \
-    --model ../ferrocarril_weights \
+    --model ferrocarril_weights \
     --voice af_heart
 Audio generated and saved to: /tmp/hello_world.wav
 
@@ -153,9 +156,12 @@ surface even though the binary's hot path only reads `phonemes`.
   `AdaIN1d.style_dim`, `CustomSTFT.window`, and `PhonesisG2P.language`
   documentation-only fields.
 
-The only remaining build warnings are 25 in the vendored `phonesis`
-crate (unused stub APIs, private-interface lints in `CompactTrie`,
-and a `static_mut_refs` warning) — those are outside this PR's scope.
+The only remaining build warnings are **none** — the follow-up
+phonesis integration pass cleaned up all 25 warnings that used to
+live in the vendored `phonesis` crate (dead `compact.rs` module
+removed, `static mut DEFAULT_DICTIONARY` migrated to `OnceLock`,
+unused fields / stub APIs deleted, optional deps pruned). The full
+workspace now builds at **zero warnings** across every crate.
 
 ### 2.2 Phase 5 — WebAssembly enablement
 
@@ -254,7 +260,7 @@ single `use ferrocarril::*;` import to reach everything.
 
 #### 2.2.6 The `ferrocarril-wasm` crate
 
-New workspace member at `ferrocarril/ferrocarril/ferrocarril-wasm/`.
+New workspace member at `ferrocarril-wasm/`.
 Exposes two `#[wasm_bindgen]` classes:
 
 ```typescript
@@ -289,7 +295,7 @@ automatically flow through.
 
 #### 2.2.7 Browser demo
 
-At `ferrocarril/ferrocarril/ferrocarril-wasm/demo/`:
+At `ferrocarril-wasm/demo/`:
 
 - **`index.html`** — two-section demo page with a smoke test (loads
   the wasm module, constructs an empty builder) and a full inference
@@ -335,34 +341,34 @@ weight payload 2–4×.
 
 ### 2.3 Test-suite snapshot
 
-`cargo test --release --features weights --no-fail-fast` at end of
+`cargo test --workspace --release --no-fail-fast` at end of
 session:
 
 ```
-15 test binaries, 24 total tests:
-- 3 passed   (custom_bert_test)
-- 3 passed   (g2p_integration::tests — basic/abbreviation/complex/length/unknown_word)
-- 1 passed   (adain_resblk1_test)
-- 1 passed   (alignment_test)
-- 1 passed   (bert_encoder_golden_test)
-- 1 passed   (bert_golden_test)
-- 2 passed   (simple_test — custom_prosody_predictor, lstm_bidirectional_with_style)
-- 1 passed   (decoder_golden_test [~424 s])
-- 1 passed   (duration_encoder_golden_test)
-- 1 passed   (end_to_end_real_voice_test [~222 s])
-- 5 passed   (g2p_integration_test)
-- 1 passed   (prosody_predictor_golden_test)
-- 2 passed   (ferrocarril-nn unit tests)
-- 1 passed   (text_encoder_golden_test)
-- 0 passed   (doc-tests, intentional)
+34 test binaries covering the whole workspace:
+- 24 ferrocarril integration tests (bert/text_encoder/prosody/decoder
+  golden tests, end_to_end_real_voice, g2p_integration, simple)
+- 20 ferrocarril-nn lib unit tests (lstm, conv, adain, bert,
+  text_encoder, prosody, vocoder — exposed by --workspace)
+- 129 phonesis tests (lib unit tests + 8 integration test files)
 
-total: 24 passed / 0 failed / 0 ignored
+total: 173 passed / 0 failed / 0 ignored / 0 warnings
 ```
 
-(The jump from 22 → 24 vs the previous session is because re-running
-with cleaner build output surfaced two previously-uncounted unit
-tests in `simple_test`, and a few tests were re-enabled by the
-cleanup. No new tests were written this session.)
+All tests use real Kokoro-82M weights for the ferrocarril crates and
+the vendored CMU dictionary for the phonesis crate. The phonesis
+tests do NOT need the `--features weights` flag — that feature is
+only meaningful to the ferrocarril crates, which get it via the
+workspace's `default = ["weights"]` pass-through.
+
+Invocation notes:
+
+- `cargo test --workspace --release --no-fail-fast` walks every
+  workspace member. This is the correct full-suite command.
+- `cargo test --release --features weights --no-fail-fast` (what
+  pre-flatten sessions ran) only tests the root `ferrocarril`
+  package — 24 tests total — and silently skips every workspace
+  member's unit tests. **Prefer `--workspace`.**
 
 ### 2.4 Performance baseline (end of this session)
 
@@ -428,7 +434,7 @@ cd ~/ferrocarril
 python3 weight_converter.py --huggingface hexgrad/Kokoro-82M --output ferrocarril_weights
 
 # 4. Native build + test (~11 s clean build, ~10 min full test suite).
-cd ~/ferrocarril/ferrocarril
+cd ~/ferrocarril
 cargo build --release --features weights
 cargo test --release --features weights --no-fail-fast
 
@@ -436,7 +442,7 @@ cargo test --release --features weights --no-fail-fast
 ./target/release/ferrocarril infer \
     --text "Hello world" \
     --output /tmp/hello.wav \
-    --model ../ferrocarril_weights \
+    --model ferrocarril_weights \
     --voice af_heart
 
 # 6. Wasm build.
@@ -450,23 +456,24 @@ cargo install wasm-bindgen-cli --version 0.2.100 --locked
 sudo dnf install -y binaryen
 
 # Build the wasm package:
-cd ~/ferrocarril/ferrocarril/ferrocarril-wasm
+cd ~/ferrocarril/ferrocarril-wasm
 ./demo/build.sh
 # -> pkg/ferrocarril_wasm_bg.wasm  (2.8 MB)
 # -> pkg/ferrocarril_wasm.js       (17 KB)
 # -> pkg/ferrocarril_wasm.d.ts     (4.3 KB)
 
 # 7. Browser demo.
-cd ~/ferrocarril/ferrocarril/ferrocarril-wasm
+cd ~/ferrocarril/ferrocarril-wasm
 python3 demo/serve.py &
 # Open http://localhost:8080/ (or the sandbox public URL).
 # The smoke test auto-runs on page load and should display:
 #   OK. ferrocarril-wasm loaded and WasmFerroModelBuilder constructed successfully.
 ```
 
-You should see 24 tests passing with 0 failures, `hello.wav` should
-be ~1.5 s of mono 24 kHz PCM with RMS around 0.048, and the browser
-demo should render with the green smoke-test success banner.
+You should see 173 tests passing with 0 failures across 34 test
+binaries, `hello.wav` should be ~1.5 s of mono 24 kHz PCM with RMS
+around 0.048, and the browser demo should render with the green
+smoke-test success banner.
 
 ---
 
@@ -532,28 +539,28 @@ const samples = model.synthesize_ipa("hɛlqʊ", voicePackBytes, 1.0);
 // samples is a Float32Array of 24 kHz mono PCM.
 ```
 
-Full reference: `ferrocarril/ferrocarril/ferrocarril-wasm/README.md`.
+Full reference: `ferrocarril-wasm/README.md`.
 
 ---
 
 ## 5. Remaining / Suggested Work (Phase 6 and beyond)
 
-> **Phase 6 performance optimization is in progress.** A follow-up
-> session has pushed native inference from ~258 s to **~2.0 s wall
-> for the canonical "Hi" input** (a ~130× speedup), primarily via
-> an AVX-512 + cache-blocked + BLIS-packed matmul kernel, an AVX-512
-> `linear_f32` dot-product kernel, direct-slice rewrites of LSTM and
-> BERT, an AVX-512 Snake1D polynomial sin, and finer-grained SIMD
-> micro-kernels (8×32 main, 4×16 intermediate remainder). The
-> `matmul_f32` kernel now runs at ~76 GFLOPS on the dominant
-> Generator shape (93 % of the 80 GFLOPS 2-FMA-port peak on the
-> sandbox's Xeon Platinum 8175M). All 24 golden tests still pass.
-> The build is still ~2× from real-time; see
-> [`PHASE6_STATUS.md`](./PHASE6_STATUS.md) for the full optimization
-> log, current profile breakdown, commit trail, timing history
-> table, and reproduction steps — including the note about
-> `commit_46` being landed but unmeasured at the time the sandbox
-> was terminated.
+> **Phase 6 performance optimization — COMPLETE.** Native inference
+> for the canonical "Hi" input dropped from ~258 s to **~596 ms at
+> N=8 workers** on the privileged Sapphire Rapids sandbox (a ~430×
+> speedup), landing at **2.14× real-time**. Includes AVX-512 matmul
+> (8×32 + 4×16 + 1×16 micro-kernels, BLIS-style b-panel packing,
+> 3-level cache blocking, N-way scoped-thread parallelism with
+> `MIN_WORK_PER_WORKER` gating), an AVX-512 `linear_f32`
+> dot-product kernel, direct-slice rewrites of LSTM and BERT, an
+> AVX-512 Snake1D polynomial sin approximation, an im2col Conv1d
+> fast path with a thread-local scratch pool, and an iSTFT + AdaIN
+> + `AdaINResBlock1` in-place rewrite. The `matmul_f32` kernel runs
+> at ~76 GFLOPS on the dominant Generator shape (~93 % of the
+> 80 GFLOPS 2-FMA-port peak). All 173 workspace tests still pass.
+> See [`PHASE6_STATUS.md`](./PHASE6_STATUS.md) for the full
+> optimisation log, per-commit timing history, multi-core scaling
+> tables, and reproduction steps.
 
 The numerical correctness workstream is complete, cleanup is
 substantially done, and WebAssembly builds clean. The remaining work
@@ -595,13 +602,25 @@ is all polish and performance.
    possible by fusing im2col into the b-panel packing (skipping the
    intermediate buffer entirely), but that's a future refinement.
 7. **Remaining `ferrocarril-nn` dead-code warnings** — **DONE** in
-   round 2 of Phase 4 (this session). All `ferrocarril-core`,
-   `-dsp`, `-nn`, and the top-level `ferrocarril` crate now build at
-   zero warnings. Only the 25 vendored `phonesis` warnings remain,
-   and those are out of scope for this work.
-8. **Flatten the nested workspace**. Move `ferrocarril/ferrocarril/**`
-   up to `ferrocarril/` so the repo root is the workspace root.
-   Pure refactor; deliberately deferred.
+   round 2 of Phase 4 and completed in the phonesis integration
+   pass. All workspace crates (`ferrocarril-core`, `-dsp`, `-nn`,
+   `-wasm`, the top-level `ferrocarril` binary, and `phonesis`) now
+   build at zero warnings. The phonesis cleanup specifically
+   removed the dead `compact.rs` module, swapped `static mut
+   DEFAULT_DICTIONARY + unsafe` for `OnceLock`, dropped unused
+   fields / methods (`raw_data`/`from_raw`, `preserve_case`,
+   `should_keep_token`, `optimized`, `find_first`/`find_all`,
+   `join_with_spaces`, `apply_english_stress`, `add_stress_rules`,
+   `SerdeError`), pruned unused optional deps (`thiserror`,
+   `serde`, `tokio`) and the dangling `[[bench]]` section from
+   `phonesis/Cargo.toml`, and integrated phonesis as a proper
+   member of the ferrocarril workspace (its own `[workspace]
+   members = ["examples/*"]` block was deleted — no sub-crates
+   actually existed).
+8. **Flatten the nested workspace** — **DONE** in the post-Phase-6
+   cleanup pass. `ferrocarril/Cargo.toml` is now the workspace
+   root; `src/`, `ferrocarril-{core,dsp,nn,wasm}/`, `tests/`, and
+   `phonesis/` are all at the top level.
 
 ---
 
@@ -679,15 +698,16 @@ against Python fixtures, end-to-end audio matches within ~1 % RMS,
 and the library crates compile to `wasm32-unknown-unknown` with a
 ready-to-run browser demo.
 
-The remaining work is **performance and polish**:
-- Weight quantisation to shrink the browser download (Phase 6.1)
-- SIMD in the wasm target (Phase 6.2)
-- Streaming inference (Phase 6.3)
-- Worker support (Phase 6.4)
-- Cache-blocked matmul + im2col Conv1d (Phases 6.5/6.6)
-- Flatten the nested workspace (Phase 6.7)
+The remaining work is **polish and browser performance**:
+- Weight quantisation to shrink the browser download
+- wasm SIMD hot paths via `core::arch::wasm32::simd128`
+- Streaming inference
+- Dedicated Worker support for the browser demo
+- Long-input sentence chunking past the 510-token BERT cap
+- OOV letter-to-sound engine in phonesis
 
-Pick based on what the user asks for next. See §5 for the full list.
+Pick based on what the user asks for next. See §5 for the full
+list and `../PLAN.md` §5 for one-paragraph-per-item context.
 
 If you need to debug a numerical regression: the golden tests will
 fail-fast at the layer that broke. The decoder golden test in

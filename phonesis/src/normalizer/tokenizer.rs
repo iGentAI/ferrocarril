@@ -86,8 +86,6 @@ impl fmt::Display for Token {
 /// Text normalizer that handles tokenization
 #[derive(Debug, Default)]
 pub struct TextNormalizer {
-    /// Whether to preserve case information
-    preserve_case: bool,
     /// Whether to keep whitespace tokens
     keep_whitespace: bool,
 }
@@ -96,15 +94,13 @@ impl TextNormalizer {
     /// Creates a new text normalizer with default settings
     pub fn new() -> Self {
         Self {
-            preserve_case: true,
             keep_whitespace: false,
         }
     }
     
-    /// Creates a new text normalizer with custom settings
-    pub fn with_options(preserve_case: bool, keep_whitespace: bool) -> Self {
+    /// Creates a new text normalizer that optionally keeps whitespace tokens
+    pub fn with_options(keep_whitespace: bool) -> Self {
         Self {
-            preserve_case,
             keep_whitespace,
         }
     }
@@ -306,14 +302,6 @@ impl TextNormalizer {
         )
     }
     
-    /// Determines if a token should be kept based on normalizer settings
-    fn should_keep_token(&self, token: &Token) -> bool {
-        match token.token_type {
-            TokenType::Whitespace => self.keep_whitespace,
-            _ => true,
-        }
-    }
-    
     /// Post-processes tokens to handle special cases like alphanumeric tokens
     pub fn post_process_tokens(&self, tokens: &mut Vec<Token>) {
         for token in tokens.iter_mut() {
@@ -386,7 +374,7 @@ mod tests {
     
     #[test]
     fn test_whitespace_handling() {
-        let normalizer = TextNormalizer::with_options(true, true);
+        let normalizer = TextNormalizer::with_options(true);
         let tokens = normalizer.tokenize("Hello  world\ttest");
         
         assert_eq!(tokens.len(), 5);

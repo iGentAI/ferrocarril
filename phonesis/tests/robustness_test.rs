@@ -8,7 +8,6 @@ use phonesis::{
     english::EnglishG2P,
     G2POptions,
     FallbackStrategy,
-    PhonemeStandard,
 };
 
 /// Test that the system always produces output for any input
@@ -236,16 +235,17 @@ fn test_random_input_robustness() {
     }
 }
 
-// Mock rand::random for testing (in real code would use the rand crate)
+// Mock rand::random for testing (in real code would use the rand crate).
 mod rand {
+    use std::sync::atomic::{AtomicU8, Ordering};
+
+    static COUNTER: AtomicU8 = AtomicU8::new(0);
+
     pub fn random<T>() -> T
-    where 
-        T: Default + From<u8>
+    where
+        T: Default + From<u8>,
     {
-        static mut COUNTER: u8 = 0;
-        unsafe {
-            COUNTER = COUNTER.wrapping_add(17);
-            T::from(COUNTER)
-        }
+        let c = COUNTER.fetch_add(17, Ordering::Relaxed);
+        T::from(c)
     }
 }

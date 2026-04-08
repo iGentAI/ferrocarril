@@ -5,45 +5,15 @@ edition = "2021"
 authors = ["Phonesis Contributors"]
 description = "A pure Rust library for grapheme-to-phoneme (G2P) conversion"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/phonesis/phonesis"
+repository = "https://github.com/iGentAI/ferrocarril"
 documentation = "https://docs.rs/phonesis"
 readme = "README.md"
 keywords = ["phonetics", "linguistics", "tts", "speech", "nlp"]
 categories = ["text-processing", "parsing"]
 
-[lib]
-name = "phonesis"
-path = "src/lib.rs"
-
-[workspace]
-members = [
-    "examples/*",
-]
-
 [features]
 default = ["english"]
 english = []
-async = ["tokio"]
-embeddings = []
 
 [dependencies]
-# Zero external dependencies for core functionality
-lazy_static = "1.4.0"  # Added for phoneme module
-# These are all optional
-thiserror = { version = "1.0", optional = true }
-serde = { version = "1.0", optional = true, features = ["derive"] }
-tokio = { version = "1.35", optional = true, features = ["rt", "macros"] }
-
-[dev-dependencies]
-criterion = "0.5"
-tempfile = "3.9"
-similar-asserts = "1.5"
-
-[[bench]]
-name = "dictionary_lookup"
-harness = false
-path = "benches/dictionary_lookup.rs"
-
-[[test]]
-name = "robustness_test"
-path = "tests/robustness_test.rs"
+lazy_static = "1.4"
