@@ -1,0 +1,107 @@
+name: Publish weight blobs to GH Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      hf_repo:
+        description: "HuggingFace repo id to convert (e.g. hexgrad/Kokoro-82M)"
+        required: true
+        default: "hexgrad/Kokoro-82M"
+      release_tag:
+        description: "GitHub Release tag to upload into"
+        required: true
+        default: "latest-weights"
+
+permissions:
+  contents: write
+
+jobs:
+  convert-and-upload:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python deps
+        run: |
+          set -e
+          python3 -m pip install --upgrade pip
+          python3 -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+          python3 -m pip install huggingface_hub numpy
+
+      - name: Run weight_converter.py
+        env:
+          HF_HUB_DOWNLOAD_TIMEOUT: "300"
+        run: |
+          set -e
+          python3 weight_converter.py \
+              --huggingface "${{ github.event.inputs.hf_repo }}" \
+              --output ferrocarril_weights
+          echo "--- summary ---"
+          du -sh ferrocarril_weights
+          find ferrocarril_weights -name '*.bin' | wc -l
+          ls ferrocarril_weights
+
+      - name: Flatten asset names for GH Release upload
+        run: |
+          set -e
+          # GitHub Release asset names cannot contain path separators,
+          # so we copy every file under ferrocarril_weights/ into a
+          # single flat staging directory with `/` replaced by `__`
+          # in the filename. Main.js's `flat` layout mode reverses
+          # this at fetch time by re-rewriting `/` to `__` on the
+          # client side, so the round trip is lossless.
+          #
+          # Example mapping:
+          #   config.json                      -> config.json
+          #   model/metadata.json              -> model__metadata.json
+          #   model/bert/foo.bin               -> model__bert__foo.bin
+          #   voices/voices.json               -> voices__voices.json
+          #   voices/af_heart.bin              -> voices__af_heart.bin
+
+          STAGE=release_stage
+          rm -rf "$STAGE"
+          mkdir -p "$STAGE"
+
+          pushd ferrocarril_weights > /dev/null
+          find . -type f | while read -r f; do
+              rel="${f#./}"
+              flat="${rel//\//__}"
+              cp "$f" "../$STAGE/$flat"
+          done
+          popd > /dev/null
+
+          echo "--- first 20 staged files ---"
+          ls "$STAGE" | head -20
+          echo "total: $(ls "$STAGE" | wc -l) files, $(du -sh "$STAGE" | cut -f1)"
+
+      - name: Publish to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.release_tag }}
+          name: "Kokoro-82M converted weights"
+          body: |
+            Converted Kokoro-82M weights for the
+            [iGentAI/ferrocarril](https://github.com/iGentAI/ferrocarril)
+            in-browser TTS demo.
+
+            - Source: `${{ github.event.inputs.hf_repo }}`
+            - Converter: `weight_converter.py` at commit ${{ github.sha }}
+            - License: Apache-2.0 (upstream)
+
+            Assets are the raw per-tensor `.bin` blobs plus the three
+            JSON metadata files. Path separators are encoded as `__`
+            in asset names because GitHub Release asset namespaces
+            cannot contain `/`; the demo's main.js reverses this at
+            fetch time when the `ferrocarril-weights-layout` meta tag
+            is set to `flat` (which the Pages deploy workflow does
+            automatically when the weights URL points at this
+            release).
+          files: release_stage/*
+          prerelease: true
+          make_latest: "false"

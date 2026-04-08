@@ -63,12 +63,15 @@
 //! the win.
 
 use crate::tensor::Tensor;
+#[cfg(target_arch = "x86_64")]
 use std::cell::RefCell;
+#[cfg(target_arch = "x86_64")]
 use std::sync::OnceLock;
 
 /// Matrices with `m` strictly less than this fall through to the
 /// single-threaded path. Avoids paying ~30-100 μs of thread spawn
 /// overhead on tiny matmuls (BERT Q/K/V projections at m=3-7, etc).
+#[cfg(target_arch = "x86_64")]
 const PARALLEL_THRESHOLD: usize = 16;
 
 /// Minimum rows per parallel worker. Equal to MR (the row block of
@@ -76,6 +79,7 @@ const PARALLEL_THRESHOLD: usize = 16;
 /// one full main-kernel iteration. Workers with fewer than `MR_MIN`
 /// rows would fall through to the small-m path, which is slower per
 /// row and defeats the parallelism gain.
+#[cfg(target_arch = "x86_64")]
 const MR_MIN: usize = 8;
 
 /// Minimum total work (f32 multiply-add ops) a parallel worker must
@@ -100,6 +104,7 @@ const MR_MIN: usize = 8;
 /// 2-way dispatcher that was never visible through the old bench
 /// suite (which only compared "blocked+SIMD" vs "scalar baseline"
 /// and never measured "serial vs 2-way" for these shapes).
+#[cfg(target_arch = "x86_64")]
 const MIN_WORK_PER_WORKER: usize = 32_000_000;
 
 /// Determine how many worker threads to use for the m-dimension
@@ -117,6 +122,7 @@ const MIN_WORK_PER_WORKER: usize = 32_000_000;
 /// overhead (~30-100 us × N workers × ~88 matmul calls per
 /// inference) and the cumulative L2 footprint of the per-worker
 /// packed b panels (256 KB each) start eating the win.
+#[cfg(target_arch = "x86_64")]
 fn matmul_workers() -> usize {
     static WORKERS: OnceLock<usize> = OnceLock::new();
     *WORKERS.get_or_init(|| {
@@ -148,6 +154,7 @@ fn matmul_workers() -> usize {
 /// The final clamp with `.max(1)` guarantees at least one worker
 /// (the caller's own thread via the serial fallback if the result
 /// is 1).
+#[cfg(target_arch = "x86_64")]
 fn worker_count_for_shape(m: usize, n: usize, k: usize) -> usize {
     let max_by_rows = (m / MR_MIN).max(1);
     // saturating_mul to defend against `m * n * k` overflowing usize
@@ -160,6 +167,7 @@ fn worker_count_for_shape(m: usize, n: usize, k: usize) -> usize {
         .max(1)
 }
 
+#[cfg(target_arch = "x86_64")]
 thread_local! {
     /// Per-thread packed b panel for the BLIS-style AVX-512 matmul
     /// inner kernel. For each `(j_block, k_block)` outer iteration,
@@ -236,12 +244,28 @@ pub fn matmul_f32(a: &[f32], b: &[f32], c: &mut [f32], m: usize, n: usize, k: us
         }
     }
 
+    // Wasm SIMD128 hot path: enabled when the build was invoked with
+    // `RUSTFLAGS="-C target-feature=+simd128"`. Mirrors the AVX2
+    // 4×LANES blocked micro-kernel structure but uses 128-bit
+    // `core::arch::wasm32` intrinsics (4-wide f32 instead of 8).
+    // The auto-vectorised scalar fallback below covers wasm builds
+    // that opt out of `simd128`, and any other unsupported target.
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+    {
+        unsafe {
+            matmul_f32_wasm_simd128(a, b, c, m, n, k);
+        }
+        return;
+    }
+
+    #[cfg(not(all(target_arch = "wasm32", target_feature = "simd128")))]
     matmul_f32_scalar(a, b, c, m, n, k);
 }
 
 /// Portable scalar fallback. Uses the ikj loop order, which LLVM
 /// auto-vectorises up to the widest SIMD instruction set the compiler
 /// was told to target.
+#[allow(dead_code)]
 fn matmul_f32_scalar(a: &[f32], b: &[f32], c: &mut [f32], m: usize, n: usize, k: usize) {
     for i in 0..m {
         let a_row = &a[i * k..(i + 1) * k];
@@ -982,6 +1006,232 @@ unsafe fn matmul_f32_avx2_serial(
                         let vc = _mm256_loadu_ps(c_row_ptr.add(jj));
                         let vres = _mm256_fmadd_ps(va, vb, vc);
                         _mm256_storeu_ps(c_row_ptr.add(jj), vres);
+                        jj += LANES;
+                    }
+
+                    while jj < j_width {
+                        *c_row_ptr.add(jj) += a_ik * *b_row_ptr.add(jj);
+                        jj += 1;
+                    }
+                }
+
+                i += 1;
+            }
+
+            k_block += KC;
+        }
+
+        j_block += NC;
+    }
+}
+
+// ============================================================================
+// wasm32 SIMD128 path
+// ============================================================================
+
+/// Cache-blocked f32 GEMM for `wasm32-unknown-unknown` built with
+/// `-C target-feature=+simd128`. Mirrors the structure of
+/// [`matmul_f32_avx2_serial`] above: same `(KC, NC)` outer cache
+/// blocking, same 4-row register-blocked main micro-kernel, same
+/// scalar tail strategy. The only differences are:
+///
+///   - **Lane width**: 4 f32 lanes per `v128` register instead of 8
+///     per `__m256`. The main micro-kernel processes a 4×4 c tile
+///     per inner iteration (4 c accumulators, 1 shared b vector,
+///     4 a broadcasts).
+///   - **No native fma**: wasm32's relaxed-simd `f32x4_relaxed_madd`
+///     would require an additional `relaxed-simd` target feature
+///     that isn't yet ubiquitous in browsers, so we use the strict
+///     `add(mul(a, b), c)` form instead. The performance hit vs a
+///     true fma is small in practice because the load/broadcast
+///     pressure dominates.
+///
+/// Cache blocking is the biggest single win over the auto-vectorised
+/// scalar path: without it, every outer `i` row re-touches the entire
+/// `(k, n)` b matrix, which thrashes wasm's linear-memory cache for
+/// any non-trivial shape. With `(KC, NC) = (256, 256)`, a `b` panel
+/// occupies 256 KB and stays resident across all `m` row iterations
+/// of the inner kernel.
+///
+/// # Safety
+/// Requires the build to enable the `simd128` target feature.
+#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+#[target_feature(enable = "simd128")]
+unsafe fn matmul_f32_wasm_simd128(
+    a: &[f32],
+    b: &[f32],
+    c: &mut [f32],
+    m: usize,
+    n: usize,
+    k: usize,
+) {
+    use std::arch::wasm32::{
+        f32x4_add, f32x4_mul, f32x4_splat, v128, v128_load, v128_store,
+    };
+
+    #[inline(always)]
+    unsafe fn fma(a: v128, b: v128, c: v128) -> v128 {
+        f32x4_add(f32x4_mul(a, b), c)
+    }
+
+    const LANES: usize = 4;
+    const NC: usize = 256;
+    const KC: usize = 256;
+    const MR: usize = 4;
+
+    let a_ptr = a.as_ptr();
+    let b_ptr = b.as_ptr();
+    let c_ptr = c.as_mut_ptr();
+
+    let mut j_block = 0;
+    while j_block < n {
+        let j_end = (j_block + NC).min(n);
+        let j_width = j_end - j_block;
+        let j_width_vec = (j_width / LANES) * LANES;
+
+        let mut k_block = 0;
+        while k_block < k {
+            let k_end = (k_block + KC).min(k);
+
+            let m_main = (m / MR) * MR;
+            let pair_end = (j_width_vec / (2 * LANES)) * (2 * LANES);
+            let mut i = 0;
+            while i < m_main {
+                let mut jj = 0;
+                while jj < pair_end {
+                    let jj1 = jj + LANES;
+
+                    let c00 = c_ptr.add(i * n + j_block + jj);
+                    let c01 = c_ptr.add(i * n + j_block + jj1);
+                    let c10 = c_ptr.add((i + 1) * n + j_block + jj);
+                    let c11 = c_ptr.add((i + 1) * n + j_block + jj1);
+                    let c20 = c_ptr.add((i + 2) * n + j_block + jj);
+                    let c21 = c_ptr.add((i + 2) * n + j_block + jj1);
+                    let c30 = c_ptr.add((i + 3) * n + j_block + jj);
+                    let c31 = c_ptr.add((i + 3) * n + j_block + jj1);
+
+                    let mut vc00 = v128_load(c00 as *const v128);
+                    let mut vc01 = v128_load(c01 as *const v128);
+                    let mut vc10 = v128_load(c10 as *const v128);
+                    let mut vc11 = v128_load(c11 as *const v128);
+                    let mut vc20 = v128_load(c20 as *const v128);
+                    let mut vc21 = v128_load(c21 as *const v128);
+                    let mut vc30 = v128_load(c30 as *const v128);
+                    let mut vc31 = v128_load(c31 as *const v128);
+
+                    for kk in k_block..k_end {
+                        let vb0 = v128_load(b_ptr.add(kk * n + j_block + jj) as *const v128);
+                        let vb1 = v128_load(b_ptr.add(kk * n + j_block + jj1) as *const v128);
+
+                        let a0 = *a_ptr.add(i * k + kk);
+                        let a1 = *a_ptr.add((i + 1) * k + kk);
+                        let a2 = *a_ptr.add((i + 2) * k + kk);
+                        let a3 = *a_ptr.add((i + 3) * k + kk);
+
+                        let va0 = f32x4_splat(a0);
+                        let va1 = f32x4_splat(a1);
+                        let va2 = f32x4_splat(a2);
+                        let va3 = f32x4_splat(a3);
+
+                        vc00 = fma(va0, vb0, vc00);
+                        vc01 = fma(va0, vb1, vc01);
+                        vc10 = fma(va1, vb0, vc10);
+                        vc11 = fma(va1, vb1, vc11);
+                        vc20 = fma(va2, vb0, vc20);
+                        vc21 = fma(va2, vb1, vc21);
+                        vc30 = fma(va3, vb0, vc30);
+                        vc31 = fma(va3, vb1, vc31);
+                    }
+
+                    v128_store(c00 as *mut v128, vc00);
+                    v128_store(c01 as *mut v128, vc01);
+                    v128_store(c10 as *mut v128, vc10);
+                    v128_store(c11 as *mut v128, vc11);
+                    v128_store(c20 as *mut v128, vc20);
+                    v128_store(c21 as *mut v128, vc21);
+                    v128_store(c30 as *mut v128, vc30);
+                    v128_store(c31 as *mut v128, vc31);
+
+                    jj += 2 * LANES;
+                }
+
+                while jj < j_width_vec {
+                    let c_slot0 = c_ptr.add(i * n + j_block + jj);
+                    let c_slot1 = c_ptr.add((i + 1) * n + j_block + jj);
+                    let c_slot2 = c_ptr.add((i + 2) * n + j_block + jj);
+                    let c_slot3 = c_ptr.add((i + 3) * n + j_block + jj);
+
+                    let mut vc0 = v128_load(c_slot0 as *const v128);
+                    let mut vc1 = v128_load(c_slot1 as *const v128);
+                    let mut vc2 = v128_load(c_slot2 as *const v128);
+                    let mut vc3 = v128_load(c_slot3 as *const v128);
+
+                    for kk in k_block..k_end {
+                        let vb = v128_load(b_ptr.add(kk * n + j_block + jj) as *const v128);
+
+                        let a0 = *a_ptr.add(i * k + kk);
+                        let a1 = *a_ptr.add((i + 1) * k + kk);
+                        let a2 = *a_ptr.add((i + 2) * k + kk);
+                        let a3 = *a_ptr.add((i + 3) * k + kk);
+
+                        let va0 = f32x4_splat(a0);
+                        let va1 = f32x4_splat(a1);
+                        let va2 = f32x4_splat(a2);
+                        let va3 = f32x4_splat(a3);
+
+                        vc0 = fma(va0, vb, vc0);
+                        vc1 = fma(va1, vb, vc1);
+                        vc2 = fma(va2, vb, vc2);
+                        vc3 = fma(va3, vb, vc3);
+                    }
+
+                    v128_store(c_slot0 as *mut v128, vc0);
+                    v128_store(c_slot1 as *mut v128, vc1);
+                    v128_store(c_slot2 as *mut v128, vc2);
+                    v128_store(c_slot3 as *mut v128, vc3);
+
+                    jj += LANES;
+                }
+
+                while jj < j_width {
+                    let j_idx = j_block + jj;
+                    let mut c0 = *c_ptr.add(i * n + j_idx);
+                    let mut c1 = *c_ptr.add((i + 1) * n + j_idx);
+                    let mut c2 = *c_ptr.add((i + 2) * n + j_idx);
+                    let mut c3 = *c_ptr.add((i + 3) * n + j_idx);
+                    for kk in k_block..k_end {
+                        let bv = *b_ptr.add(kk * n + j_idx);
+                        c0 += *a_ptr.add(i * k + kk) * bv;
+                        c1 += *a_ptr.add((i + 1) * k + kk) * bv;
+                        c2 += *a_ptr.add((i + 2) * k + kk) * bv;
+                        c3 += *a_ptr.add((i + 3) * k + kk) * bv;
+                    }
+                    *c_ptr.add(i * n + j_idx) = c0;
+                    *c_ptr.add((i + 1) * n + j_idx) = c1;
+                    *c_ptr.add((i + 2) * n + j_idx) = c2;
+                    *c_ptr.add((i + 3) * n + j_idx) = c3;
+                    jj += 1;
+                }
+
+                i += MR;
+            }
+
+            // 1-row remainder for `m % MR` rows.
+            while i < m {
+                let c_row_ptr = c_ptr.add(i * n + j_block);
+                let a_row_ptr = a_ptr.add(i * k);
+
+                for kk in k_block..k_end {
+                    let a_ik = *a_row_ptr.add(kk);
+                    let b_row_ptr = b_ptr.add(kk * n + j_block);
+                    let va = f32x4_splat(a_ik);
+
+                    let mut jj = 0;
+                    while jj < j_width_vec {
+                        let vb = v128_load(b_row_ptr.add(jj) as *const v128);
+                        let vc = v128_load(c_row_ptr.add(jj) as *const v128);
+                        let vres = fma(va, vb, vc);
+                        v128_store(c_row_ptr.add(jj) as *mut v128, vres);
                         jj += LANES;
                     }
 

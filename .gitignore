@@ -28,6 +28,12 @@ real_kokoro_weights/
 demo_audio.wav
 test_output/
 
+# wasm-bindgen output for the ferrocarril-wasm demo. Rebuilt on
+# demand via `ferrocarril-wasm/demo/build.sh`. The Pages workflow
+# regenerates this fresh in CI, and local developers rebuild it
+# after any Rust change, so it should never be checked in.
+ferrocarril-wasm/demo/pkg/
+
 # RustRover
 #  JetBrains specific template is maintained in a separate JetBrains.gitignore that can
 #  be found at https://github.com/github/gitignore/blob/main/Global/JetBrains.gitignore

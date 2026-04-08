@@ -146,9 +146,13 @@ impl FerroModel {
         loader: BinaryWeightLoader,
         config: Config,
     ) -> Result<Self, Box<dyn Error>> {
+        #[cfg(not(target_arch = "wasm32"))]
         let profile = std::env::var("FERRO_PROFILE").is_ok();
+        #[cfg(not(target_arch = "wasm32"))]
         let t_start = std::time::Instant::now();
+        #[cfg(not(target_arch = "wasm32"))]
         let mut t_mark = t_start;
+        #[cfg(not(target_arch = "wasm32"))]
         macro_rules! stage {
             ($name:expr) => {
                 if profile {
@@ -161,6 +165,10 @@ impl FerroModel {
                     t_mark = now;
                 }
             };
+        }
+        #[cfg(target_arch = "wasm32")]
+        macro_rules! stage {
+            ($name:expr) => { { let _ = $name; } };
         }
 
         if loader.is_empty() {
@@ -241,6 +249,7 @@ impl FerroModel {
         // supported targets (including wasm32).
         let g2p = G2PHandler::new("en-us")?;
 
+        #[cfg(not(target_arch = "wasm32"))]
         if profile {
             let total = (std::time::Instant::now() - t_start).as_secs_f64() * 1000.0;
             eprintln!("[profile] load {:-<32} {:->12}", "", "");
@@ -279,9 +288,13 @@ impl FerroModel {
     /// Implement the full inference pipeline
     #[allow(unused_assignments)]
     pub fn infer_with_phonemes(&self, phonemes: &str, voice_embedding: &Tensor<f32>, speed_factor: f32) -> Result<Vec<f32>, Box<dyn Error>> {
+        #[cfg(not(target_arch = "wasm32"))]
         let profile = std::env::var("FERRO_PROFILE").is_ok();
+        #[cfg(not(target_arch = "wasm32"))]
         let t_start = std::time::Instant::now();
+        #[cfg(not(target_arch = "wasm32"))]
         let mut t_mark = t_start;
+        #[cfg(not(target_arch = "wasm32"))]
         macro_rules! stage {
             ($name:expr) => {
                 if profile {
@@ -295,7 +308,12 @@ impl FerroModel {
                 }
             };
         }
+        #[cfg(target_arch = "wasm32")]
+        macro_rules! stage {
+            ($name:expr) => { { let _ = $name; } };
+        }
 
+        #[cfg(not(target_arch = "wasm32"))]
         if profile {
             ferrocarril_nn::conv::reset_conv1d_stats();
         }
@@ -541,6 +559,7 @@ impl FerroModel {
                 // Return audio data
                 let audio_data = audio.data().to_vec();
 
+                #[cfg(not(target_arch = "wasm32"))]
                 if profile {
                     ferrocarril_nn::conv::dump_conv1d_stats();
                     let total = (std::time::Instant::now() - t_start).as_secs_f64() * 1000.0;

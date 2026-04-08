@@ -3,21 +3,61 @@
 
 Routes:
   /             -> the demo directory (index.html, main.js, pkg/)
-  /weights/...  -> the ../../../ferrocarril_weights directory
+  /weights/...  -> the converted weights directory (see below)
 
 The weights directory is expected to contain the output of
 `weight_converter.py` (i.e. `config.json`, `model/metadata.json`, per-
 tensor `.bin` files, and `voices/voices.json` + per-voice `.bin` files).
+It is looked up in this order:
+
+  1. `$FERROCARRIL_WEIGHTS` environment variable, if set.
+  2. `{workspace_root}/ferrocarril_weights` — the in-workspace
+     location you get by running `python3 weight_converter.py
+     --output ferrocarril_weights` from the repo root.
+  3. `{workspace_root.parent}/ferrocarril_weights` — a legacy
+     sibling layout kept for backwards compatibility.
+
+If none of those exist, the server still starts so the smoke test
+panel works, but `/weights/*` requests will 404.
 """
 
 from http.server import HTTPServer, SimpleHTTPRequestHandler
 from pathlib import Path
+import mimetypes
 import os
 import sys
 
+# Make sure `.wasm` always resolves to `application/wasm`. Python 3.x's
+# default `mimetypes` consults the system `mime.types` file, which may
+# or may not include the wasm entry depending on the host OS version.
+# Registering here ensures the default `SimpleHTTPRequestHandler.send_head()`
+# emits exactly one `Content-Type: application/wasm` header for wasm files.
+mimetypes.add_type("application/wasm", ".wasm")
+
 DEMO_DIR = Path(__file__).resolve().parent
 WORKSPACE_ROOT = DEMO_DIR.parent.parent  # ferrocarril/ (workspace root)
-WEIGHTS_DIR = (WORKSPACE_ROOT.parent / "ferrocarril_weights").resolve()
+
+
+def _find_weights_dir(workspace_root: Path) -> Path:
+    """Return the first existing weights directory from the search
+    order documented in the module docstring, or the canonical
+    in-workspace path as a placeholder if none exist (so the error
+    message points at the right place)."""
+    env_override = os.environ.get("FERROCARRIL_WEIGHTS")
+    if env_override:
+        return Path(env_override).resolve()
+
+    candidates = [
+        workspace_root / "ferrocarril_weights",
+        workspace_root.parent / "ferrocarril_weights",
+    ]
+    for c in candidates:
+        if c.exists():
+            return c.resolve()
+    return candidates[0].resolve()
+
+
+WEIGHTS_DIR = _find_weights_dir(WORKSPACE_ROOT)
 
 PORT = int(os.environ.get("PORT", "8080"))
 HOST = os.environ.get("HOST", "0.0.0.0")
@@ -67,11 +107,6 @@ class DemoHandler(SimpleHTTPRequestHandler):
         return super().translate_path(path)
 
     def end_headers(self) -> None:
-        # Modern browsers require `application/wasm` for streaming
-        # compile; SimpleHTTPServer guesses it correctly on newer
-        # Pythons but we set it explicitly to be safe.
-        if self.path.endswith(".wasm"):
-            self.send_header("Content-Type", "application/wasm")
         # Permissive CORS for local dev.
         self.send_header("Access-Control-Allow-Origin", "*")
         super().end_headers()
