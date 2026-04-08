@@ -3,19 +3,19 @@
 
 **Version**: 0.1.0  
 **Status**: In Development  
-**Last Updated**: April 26, 2025
+**Last Updated**: April 2026
 
 ## 1. Introduction
 
-Phonesis is a pure Rust, zero-dependency library for converting graphemes (written text) to phonemes (pronunciation units). This document outlines the design decisions, architecture, and implementation strategies for the library.
+Phonesis is a pure-Rust library for converting graphemes (written text) to phonemes (pronunciation units) with minimal external dependencies. This document outlines the design decisions, architecture, and implementation strategies for the library.
 
 ### 1.1 Motivation
 
-Text-to-speech systems require accurate conversion from text to pronunciation. While several G2P libraries exist in other languages, the Rust ecosystem lacks a comprehensive, dependency-free solution. Phonesis aims to fill this gap, providing a high-quality G2P system that aligns with Rust's emphasis on performance, safety, and ergonomics.
+Text-to-speech systems require accurate conversion from text to pronunciation. While several G2P libraries exist in other languages, the Rust ecosystem lacks a comprehensive, lightweight solution. Phonesis aims to fill this gap, providing a high-quality G2P system that aligns with Rust's emphasis on performance, safety, and ergonomics.
 
 ### 1.2 Design Goals
 
-1. **Zero External Dependencies**: Implement all functionality in pure Rust without relying on external libraries or bindings.
+1. **Minimal External Dependencies**: Implement the core functionality in pure Rust, with only `lazy_static` for compile-time mapping tables.
 2. **High Performance**: Optimize for speed and memory efficiency, suitable for both desktop and embedded applications.
 3. **Accuracy**: Provide accurate pronunciations for common words and reasonable approximations for uncommon ones.
 4. **Extensibility**: Design the architecture to support multiple languages and phonetic standards.
@@ -222,37 +222,17 @@ Benefits:
 - Priority-based application order
 - Constraint system for fine-grained control
 
-### 4.3 Binary Dictionary Format
+### 4.3 Runtime Dictionary Format
 
-The binary dictionary format is designed for efficient loading:
-
-```
-[Header: 16 bytes]
-  - Magic: 4 bytes ("PHON")
-  - Version: 2 bytes
-  - Entry count: 4 bytes
-  - Metadata offset: 4 bytes
-  - Checksum: 2 bytes
-
-[String table: variable length]
-  - Null-terminated strings
-
-[Trie nodes: variable length]
-  - Each node: 4 bytes (2 bytes children count, 2 bytes value index)
-  - Child entries: 4 bytes each (1 byte char, 3 bytes child index)
-
-[Phoneme sequences: variable length]
-  - Each sequence: 2 bytes length + packed phoneme data
-
-[Metadata: variable length]
-  - Additional dictionary information
-```
+The CMU Pronouncing Dictionary is embedded directly into the library binary at build time — the ~135k entries are compiled into a `&'static str` constant via a `include_str!`-style include of a generated Rust data file. At process start, a lazy singleton parses that string into a `PronunciationDictionary` exactly once (via `std::sync::OnceLock`) and hands out `Arc<PronunciationDictionary>` clones to callers.
 
 Benefits:
-- Compact representation of dictionary data
-- Fast load time with minimal parsing
-- Support for incremental loading
-- Option for memory mapping
+- No runtime filesystem access — the dictionary travels inside the library artifact, which is essential for WebAssembly targets.
+- First lookup is cheap because the trie build happens once lazily.
+- No serialization format to maintain or version: the dictionary is just the CMU source text at the point where it's compiled in.
+- Rebuilding phonesis with a different dictionary is a matter of regenerating that one embedded data file.
+
+(A prototype binary trie serialization format lived in an earlier release under `src/dictionary/compact.rs`. It was never reachable from live code and was removed in the April-8 cleanup pass; the current dictionary path uses the in-memory trie directly.)
 
 ## 5. Algorithms
 
@@ -286,9 +266,9 @@ Benefits:
 
 ## 6. Design Decisions
 
-### 6.1 Zero Dependencies Philosophy
+### 6.1 Minimal Dependencies Philosophy
 
-**Decision**: Implement all functionality in pure Rust with no external dependencies and embed all data directly in the source code.
+**Decision**: Implement all functionality in pure Rust with minimal external dependencies and embed all data directly in the source code.
 
 **Rationale**:
 - Reduces compilation time and binary size

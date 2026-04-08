@@ -482,7 +482,7 @@ impl GraphemeToPhoneme for EnglishG2P {
         Ok(result)
     }
     
-    fn convert_with_context(&self, text: &str, context: &Context) -> Result<Vec<Phoneme>> {
+    fn convert_with_context(&self, text: &str, _context: &Context) -> Result<Vec<Phoneme>> {
         // In a full implementation, this would use the context to improve pronunciation
         // For now, we'll just use the regular convert method
         self.convert(text)

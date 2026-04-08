@@ -65,7 +65,7 @@ impl CompactTrie {
         }
         
         // Store the pronunciation
-        let value_idx = match self.nodes[node_idx].value {
+        let _value_idx = match self.nodes[node_idx].value {
             Some(idx) => {
                 // Replace the existing pronunciation
                 self.values[idx] = pronunciation;
@@ -132,16 +132,6 @@ impl CompactTrie {
             self.collect_words(child_idx, prefix, result);
             prefix.pop();
         }
-    }
-    
-    /// Get the raw nodes and values for binary serialization.
-    pub(crate) fn raw_data(&self) -> (&[Node], &[PhonemeSequence]) {
-        (&self.nodes, &self.values)
-    }
-    
-    /// Create a trie from raw nodes and values.
-    pub(crate) fn from_raw(nodes: Vec<Node>, values: Vec<PhonemeSequence>) -> Self {
-        Self { nodes, values }
     }
 }
 

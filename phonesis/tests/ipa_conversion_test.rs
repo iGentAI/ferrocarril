@@ -7,7 +7,6 @@ use phonesis::{
     GraphemeToPhoneme,
     english::EnglishG2P,
     PhonemeStandard,
-    convert_phonemes,
     G2POptions,
     FallbackStrategy,
 };

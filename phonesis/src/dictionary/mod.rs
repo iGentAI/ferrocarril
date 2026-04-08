@@ -3,7 +3,6 @@
 //! including the `PronunciationDictionary` struct for efficient word lookup.
 
 mod trie;
-mod compact;
 
 use std::collections::HashMap;
 use std::fs::File;

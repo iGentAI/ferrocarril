@@ -30,14 +30,16 @@
 > for Phase 6 measurement.
 >
 > **Test status at end of evening session:**
-> `cargo test --release --features weights --no-fail-fast` on the
-> privileged sandbox → **24 passed / 0 failed / 0 ignored** in
-> **~18 s wall** (down from the ~10 min the afternoon block would
-> project). The full suite runs this much faster because the
-> golden tests are dominated by the decoder forward pass, and
-> commit_1 + commit_4 + the ~3× per-core Sapphire Rapids advantage
-> combine to make each golden test's forward run in ~1 s instead
-> of ~5-8 minutes.
+> `cargo test --workspace --release --no-fail-fast` on the
+> privileged sandbox → **173 passed / 0 failed / 0 ignored / 0
+> warnings** across 34 test binaries (24 ferrocarril integration
+> tests + 20 ferrocarril-nn lib unit tests + 129 phonesis lib +
+> integration tests) in **~18 s wall** (down from the ~10 min the
+> afternoon block would project). The full suite runs this much
+> faster because the golden tests are dominated by the decoder
+> forward pass, and commit_1 + commit_4 + the ~3× per-core
+> Sapphire Rapids advantage combine to make each golden test's
+> forward run in ~1 s instead of ~5-8 minutes.
 
 ## Commits shipped in this session
 
@@ -506,7 +508,7 @@ Key files touched:
 
 ```bash
 # Build optimised
-cd ~/ferrocarril/ferrocarril
+cd ~/ferrocarril
 cargo build --release
 
 # Micro-benchmark matmul. Shapes that exercise which paths:
@@ -531,11 +533,12 @@ cargo build --release --bin bench_matmul -p ferrocarril-core
 FERRO_PROFILE=1 ./target/release/ferrocarril infer \
   --text "Hi" \
   --output /tmp/hi.wav \
-  --model ../ferrocarril_weights \
+  --model ferrocarril_weights \
   --voice af_heart
 
 # Run the golden test suite to verify numerical correctness after
-# both commit_45 and commit_46 (all 24 tests should pass at f32
+# both commit_45 and commit_46 (all 24 ferrocarril integration
+# tests + the rest of the 173 workspace tests should pass at f32
 # precision against the Python fixtures).
-cargo test --release --features weights --no-fail-fast
+cargo test --workspace --release --no-fail-fast
 ```

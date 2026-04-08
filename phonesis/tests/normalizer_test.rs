@@ -104,7 +104,7 @@ fn test_complex_cases() {
 #[test]
 fn test_custom_normalizer() {
     // Create custom components
-    let tokenizer = TextNormalizer::with_options(true, false);
+    let tokenizer = TextNormalizer::with_options(false);
     let number_converter = NumberConverter::default();
     let symbol_mapper = SymbolMapper::default();
     

@@ -30,9 +30,6 @@ pub enum G2PError {
     /// IO error during dictionary loading
     IoError(String),
     
-    /// Serialization or deserialization error
-    SerdeError(String),
-    
     /// General error
     Other(String),
 }
@@ -50,7 +47,6 @@ impl std::fmt::Display for G2PError {
             G2PError::InvalidInput(msg) => write!(f, "Invalid input: {}", msg),
             G2PError::UnknownWord(msg) => write!(f, "Unknown word: {}", msg),
             G2PError::IoError(msg) => write!(f, "IO error: {}", msg),
-            G2PError::SerdeError(msg) => write!(f, "Serialization error: {}", msg),
             G2PError::Other(msg) => write!(f, "Error: {}", msg),
         }
     }
@@ -59,13 +55,6 @@ impl std::fmt::Display for G2PError {
 impl From<std::io::Error> for G2PError {
     fn from(error: std::io::Error) -> Self {
         G2PError::IoError(error.to_string())
-    }
-}
-
-#[cfg(feature = "serde")]
-impl From<serde_json::Error> for G2PError {
-    fn from(error: serde_json::Error) -> Self {
-        G2PError::SerdeError(error.to_string())
     }
 }
 

@@ -1,9 +1,7 @@
 //! Example usage of the Phonesis text normalization module
 
 use phonesis::normalizer::{
-    Normalizer, TextNormalizer, NumberConverter, SymbolMapper,
-    NumberConverterOptions, SymbolMapperOptions, ContextRule,
-    Token, TokenType
+    Normalizer, TextNormalizer, NumberConverter,
 };
 use std::io::{self, Write};
 

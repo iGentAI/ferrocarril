@@ -28,9 +28,6 @@ pub struct FerrocarrilG2PAdapter {
     /// Target phoneme standard
     standard: PhonemeStandard,
     
-    /// Whether to join phonemes with spaces
-    join_with_spaces: bool,
-    
     /// Cache for commonly used conversions
     cache: HashMap<String, String>,
     
@@ -53,7 +50,6 @@ impl FerrocarrilG2PAdapter {
             inner: Arc::new(g2p),
             language: "en-us".to_string(),
             standard: PhonemeStandard::ARPABET,
-            join_with_spaces: true,
             cache: HashMap::new(),
             max_cache_size: 1000, // Default cache size
         })
@@ -64,14 +60,12 @@ impl FerrocarrilG2PAdapter {
         g2p: G,
         language: &str,
         standard: PhonemeStandard,
-        join_with_spaces: bool,
         max_cache_size: usize,
     ) -> Self {
         Self {
             inner: Arc::new(g2p),
             language: language.to_string(),
             standard,
-            join_with_spaces,
             cache: HashMap::new(),
             max_cache_size,
         }
@@ -154,7 +148,7 @@ mod tests {
     
     #[test]
     fn test_factory_creation() -> Result<(), Box<dyn std::error::Error>> {
-        let mut adapter = create_ferrocarril_g2p("en-us")?;
+        let adapter = create_ferrocarril_g2p("en-us")?;
         assert_eq!(adapter.language(), "en-us");
         
         // Should fail for unsupported languages

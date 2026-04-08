@@ -6,9 +6,6 @@
 use phonesis::{
     GraphemeToPhoneme,
     english::EnglishG2P,
-    G2POptions,
-    FallbackStrategy,
-    PhonemeStandard,
 };
 use std::error::Error;
 
@@ -35,7 +32,7 @@ fn test_decimal_numbers() -> Result<(), Box<dyn Error>> {
         ("1.23e6", "one point twenty-three e six"),  // May not normalize correctly
     ];
     
-    for (input, expected_normalized) in &test_cases {
+    for (input, _expected_normalized) in &test_cases {
         println!("Testing decimal: {}", input);
         match g2p.convert(input) {
             Ok(phonemes) => {

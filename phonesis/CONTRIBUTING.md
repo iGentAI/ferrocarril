@@ -25,6 +25,10 @@ This section guides you through submitting a bug report. Following these guideli
 * Include code samples and, if possible, a minimal reproducible example
 * Include your Rust and Phonesis versions
 
+Please file issues at
+[iGentAI/ferrocarril](https://github.com/iGentAI/ferrocarril/issues)
+(phonesis lives inside the ferrocarril workspace).
+
 ### Suggesting Enhancements
 
 This section guides you through submitting an enhancement suggestion, including completely new features and minor improvements to existing functionality.
@@ -38,10 +42,10 @@ This section guides you through submitting an enhancement suggestion, including 
 
 ### Your First Code Contribution
 
-Unsure where to begin contributing? You can start by looking through these `good-first-issue` and `help-wanted` issues:
-
-* [Good first issues](https://github.com/phonesis/phonesis/issues?q=is%3Aopen+is%3Aissue+label%3A%22good+first+issue%22) - issues which should only require a few lines of code and tests
-* [Help wanted issues](https://github.com/phonesis/phonesis/issues?q=is%3Aopen+is%3Aissue+label%3A%22help+wanted%22) - issues which need more involvement
+Unsure where to begin contributing? Check the
+[open issues](https://github.com/iGentAI/ferrocarril/issues) on the
+ferrocarril repository — look for labels like `good first issue` or
+`help wanted`, or for any issue tagged with `phonesis`.
 
 ### Pull Requests
 
@@ -50,7 +54,6 @@ Unsure where to begin contributing? You can start by looking through these `good
 * Include a reference to any relevant issues
 * Include before-and-after examples if your change affects output
 * Update the README.md with details of major changes
-* Update the CHANGELOG.md file
 * Make sure your code passes all tests
 * Add new tests for new functionality
 
@@ -80,27 +83,23 @@ All Rust code should adhere to the [Rust Style Guide](https://github.com/rust-la
 
 ## Development Setup
 
-1. Fork the repository
+1. Fork the repository at
+   [iGentAI/ferrocarril](https://github.com/iGentAI/ferrocarril)
 2. Clone your fork locally
-3. Install development dependencies
-   ```bash
-   cargo install cargo-make
-   cargo install cargo-tarpaulin
-   cargo install cargo-audit
-   ```
-4. Create a branch for your changes
+3. Create a branch for your changes
    ```bash
    git checkout -b feature/your-feature-name
    ```
-5. Make your changes and run tests
+4. Make your changes and run tests
    ```bash
-   cargo test
+   cd phonesis
+   cargo test --release
    cargo clippy
    cargo fmt --check
    ```
-6. Commit your changes using a descriptive commit message
-7. Push your branch to GitHub
-8. Submit a pull request
+5. Commit your changes using a descriptive commit message
+6. Push your branch to GitHub
+7. Submit a pull request
 
 ## Project Structure
 
@@ -112,18 +111,16 @@ phonesis/
 │   ├── lib.rs                   # Main library entry point
 │   ├── error.rs                 # Error types and handling
 │   ├── phoneme.rs               # Phoneme representation
+│   ├── ferrocarril_adapter.rs   # Ferrocarril TTS adapter
 │   ├── dictionary/              # Dictionary component
 │   │   ├── mod.rs               # Dictionary public API
-│   │   ├── trie.rs              # Trie implementation
-│   │   ├── compact.rs           # Compact data structures
-│   │   └── loader.rs            # Dictionary loading
+│   │   └── trie.rs              # Compact trie implementation
 │   ├── rules/                   # Rule engine
 │   ├── normalizer/              # Text normalization
-│   ├── english/                 # English language implementation
-│   └── utils/                   # Common utilities
+│   └── english/                 # English-specific implementation
 ├── examples/                    # Example usage
 ├── tests/                       # Integration tests
-├── benches/                     # Performance benchmarks
+├── embedded_dictionary_data.rs  # CMU dictionary compiled in
 ├── Cargo.toml                   # Package configuration
 └── README.md                    # Documentation
 ```
@@ -141,7 +138,6 @@ Consider the following when adding dependencies:
 
 * All code should be covered by tests
 * New features should include both unit and integration tests
-* Performance-critical code should include benchmarks
 * Tests should be deterministic and not rely on external resources
 
 ## Dictionary and Data Contributions
@@ -162,10 +158,9 @@ If you're contributing a new language or dictionary:
 ## Release Process
 
 1. Update version in Cargo.toml
-2. Update CHANGELOG.md with changes
-3. Create a new git tag
-4. Submit a pull request for review
-5. Once approved, merge and publish to crates.io
+2. Create a new git tag
+3. Submit a pull request for review
+4. Once approved, merge and publish to crates.io
 
 ## Becoming a Maintainer
 

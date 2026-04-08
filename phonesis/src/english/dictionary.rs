@@ -1,50 +1,48 @@
 //! English dictionary data for the Phonesis G2P system
 //!
-//! This module provides a default embedded dictionary for English words,
-//! using data converted from WikiPron (CC0/public domain license).
+//! Provides the default embedded dictionary for English words, built
+//! from the CMU Pronouncing Dictionary (public domain). The dictionary
+//! is lazily loaded once per process via `OnceLock`.
 
-use std::sync::Once;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use crate::{
     dictionary::PronunciationDictionary,
     phoneme::PhonemeStandard,
-    error::{G2PError, Result},
+    error::Result,
 };
 
-// Static dictionary initialization
-static INIT_DICTIONARY: Once = Once::new();
-static mut DEFAULT_DICTIONARY: Option<Arc<PronunciationDictionary>> = None;
+// Lazily-initialised process-global dictionary. `OnceLock` replaces the
+// legacy `static mut DEFAULT_DICTIONARY + Once + unsafe` pattern from
+// pre-Rust-1.70 code; it gives us the same "initialise exactly once"
+// semantics with no unsafe and no shared-mutable-static warning.
+static DEFAULT_DICTIONARY: OnceLock<Arc<PronunciationDictionary>> = OnceLock::new();
 
-// Include the entire dictionary data as a constant string
-// This embeds the dictionary into the binary at compile time
+// Include the entire dictionary data as a constant string so the
+// dictionary is embedded in the binary at compile time.
 include!("../../embedded_dictionary_data.rs");
 
 /// Get the default English pronunciation dictionary.
 pub fn get_default_dictionary() -> Result<Arc<PronunciationDictionary>> {
-    unsafe {
-        INIT_DICTIONARY.call_once(|| {
-            // Initialize dictionary with embedded data
-            match PronunciationDictionary::from_cmu_str(EMBEDDED_CMU_DICTIONARY, "en-us") {
-                Ok(mut dict) => {
-                    // Add missing essential number words that aren't in WikiPron
-                    add_missing_essentials(&mut dict);
-                    DEFAULT_DICTIONARY = Some(Arc::new(dict));
-                },
-                Err(e) => {
-                    eprintln!("Failed to load embedded dictionary: {}", e);
-                    // Initialize with empty dictionary as fallback
-                    let empty_dict = PronunciationDictionary::new("en-us", PhonemeStandard::ARPABET);
-                    DEFAULT_DICTIONARY = Some(Arc::new(empty_dict));
-                }
+    let dict = DEFAULT_DICTIONARY.get_or_init(|| {
+        match PronunciationDictionary::from_cmu_str(EMBEDDED_CMU_DICTIONARY, "en-us") {
+            Ok(mut dict) => {
+                // Inject number words, days of the week, common
+                // abbreviations, and a handful of tech terms that the
+                // raw CMU dict either misses or mis-stresses for TTS.
+                add_missing_essentials(&mut dict);
+                Arc::new(dict)
             }
-        });
-        
-        match &DEFAULT_DICTIONARY {
-            Some(dict) => Ok(Arc::clone(dict)),
-            None => Err(G2PError::DictionaryError("Default dictionary not initialized".to_string())),
+            Err(e) => {
+                eprintln!("Failed to load embedded dictionary: {}", e);
+                // Fall back to an empty dictionary so callers still get
+                // a valid Arc and can rely on rule-based + character
+                // fallback paths.
+                Arc::new(PronunciationDictionary::new("en-us", PhonemeStandard::ARPABET))
+            }
         }
-    }
+    });
+    Ok(Arc::clone(dict))
 }
 
 /// Add missing essential words to the dictionary
