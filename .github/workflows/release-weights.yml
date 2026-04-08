@@ -45,63 +45,69 @@ jobs:
           echo "--- summary ---"
           du -sh ferrocarril_weights
           find ferrocarril_weights -name '*.bin' | wc -l
-          ls ferrocarril_weights
 
-      - name: Flatten asset names for GH Release upload
+      - name: Pack weights into a single tar
         run: |
           set -e
-          # GitHub Release asset names cannot contain path separators,
-          # so we copy every file under ferrocarril_weights/ into a
-          # single flat staging directory with `/` replaced by `__`
-          # in the filename. Main.js's `flat` layout mode reverses
-          # this at fetch time by re-rewriting `/` to `__` on the
-          # client side, so the round trip is lossless.
-          #
-          # Example mapping:
-          #   config.json                      -> config.json
-          #   model/metadata.json              -> model__metadata.json
-          #   model/bert/foo.bin               -> model__bert__foo.bin
-          #   voices/voices.json               -> voices__voices.json
-          #   voices/af_heart.bin              -> voices__af_heart.bin
+          # One single asset for the release. The demo's `tar` layout
+          # streams this down with progress tracking, parses it inline
+          # with a ~60-line USTAR reader, and feeds every blob to the
+          # WasmFerroModelBuilder. Using tar instead of per-file assets
+          # avoids GitHub's 500 content-creation requests/hour secondary
+          # rate limit on release asset uploads (which the prior version
+          # of this workflow hit mid-upload of the 605-file batch) and
+          # also cuts the demo's cold-load HTTP round-trip count from
+          # ~75 (at concurrency 12) to 1.
+          tar -cf weights.tar -C ferrocarril_weights .
+          ls -lh weights.tar
+          echo "--- tar entry count ---"
+          tar -tf weights.tar | wc -l
 
-          STAGE=release_stage
-          rm -rf "$STAGE"
-          mkdir -p "$STAGE"
+      - name: Publish to GitHub Release (via gh CLI)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.inputs.release_tag }}
+          HF_REPO: ${{ github.event.inputs.hf_repo }}
+        run: |
+          set -e
 
-          pushd ferrocarril_weights > /dev/null
-          find . -type f | while read -r f; do
-              rel="${f#./}"
-              flat="${rel//\//__}"
-              cp "$f" "../$STAGE/$flat"
-          done
-          popd > /dev/null
+          # Idempotency: delete any existing release with the same tag
+          # (and any partial assets left over from a previously failed
+          # run) before recreating it fresh. `|| true` so the first-time
+          # run doesn't fail on the delete step.
+          echo "Deleting existing release '$TAG' (if any)..."
+          gh release delete "$TAG" --yes --cleanup-tag --repo "$GITHUB_REPOSITORY" || true
 
-          echo "--- first 20 staged files ---"
-          ls "$STAGE" | head -20
-          echo "total: $(ls "$STAGE" | wc -l) files, $(du -sh "$STAGE" | cut -f1)"
+          # Write release notes to a temp file so we don't have to
+          # escape shell metacharacters in --notes.
+          cat > release_notes.md <<MARKDOWN
+          Converted Kokoro-82M weights for the
+          [iGentAI/ferrocarril](https://github.com/iGentAI/ferrocarril)
+          in-browser TTS demo.
 
-      - name: Publish to GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ github.event.inputs.release_tag }}
-          name: "Kokoro-82M converted weights"
-          body: |
-            Converted Kokoro-82M weights for the
-            [iGentAI/ferrocarril](https://github.com/iGentAI/ferrocarril)
-            in-browser TTS demo.
+          - Source: \`$HF_REPO\`
+          - Converter: \`weight_converter.py\` at commit $GITHUB_SHA
+          - License: Apache-2.0 (upstream)
 
-            - Source: `${{ github.event.inputs.hf_repo }}`
-            - Converter: `weight_converter.py` at commit ${{ github.sha }}
-            - License: Apache-2.0 (upstream)
+          This release contains a single \`weights.tar\` asset that packs
+          every per-tensor \`.bin\` blob plus the three JSON metadata
+          files. The demo's \`tar\` layout streams this archive down with
+          progress tracking and parses it inline with a USTAR reader, so
+          a visitor makes exactly one HTTP request to load the full
+          ~340 MB model instead of 600+ round trips.
 
-            Assets are the raw per-tensor `.bin` blobs plus the three
-            JSON metadata files. Path separators are encoded as `__`
-            in asset names because GitHub Release asset namespaces
-            cannot contain `/`; the demo's main.js reverses this at
-            fetch time when the `ferrocarril-weights-layout` meta tag
-            is set to `flat` (which the Pages deploy workflow does
-            automatically when the weights URL points at this
-            release).
-          files: release_stage/*
-          prerelease: true
-          make_latest: "false"
+          This release is marked as a prerelease so it does not take
+          over the repository homepage.
+          MARKDOWN
+
+          echo "Creating release '$TAG' with weights.tar..."
+          gh release create "$TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "Kokoro-82M converted weights" \
+              --notes-file release_notes.md \
+              --prerelease \
+              --latest=false \
+              weights.tar
+
+          echo "--- final release state ---"
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY"

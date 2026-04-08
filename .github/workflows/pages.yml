@@ -94,17 +94,23 @@ jobs:
           #   * Explicit override via FERROCARRIL_WEIGHTS_LAYOUT wins.
           #   * Otherwise, if the URL contains "/releases/download/"
           #     anywhere (i.e. it's a GitHub Release asset endpoint),
-          #     use `flat` — GH Release asset names cannot contain
-          #     `/`, so release-weights.yml flattens them and main.js
-          #     has to un-flatten at fetch time.
-          #   * Any other host is assumed to support nested paths.
+          #     use `tar` — the release-weights.yml workflow uploads a
+          #     single weights.tar asset there, which main.js streams
+          #     down and parses inline with a USTAR reader. GH Release
+          #     asset names can't contain `/` and GH's 500/hour
+          #     content-creation rate limit makes per-file uploads
+          #     infeasible at 600+ files, so tar is the only sensible
+          #     release-hosted option.
+          #   * Any other host is assumed to support nested directory
+          #     paths, which covers local serve.py development, Hugging
+          #     Face Hub, Cloudflare R2, S3, and similar.
           # We use `grep -q` rather than a bash glob here because it's
           # unambiguously a substring test and is obvious to any
           # reviewer — no bash-pattern-semantics debate.
           if [[ -n "${FERROCARRIL_WEIGHTS_LAYOUT:-}" ]]; then
               WEIGHTS_LAYOUT="$FERROCARRIL_WEIGHTS_LAYOUT"
           elif printf '%s' "$WEIGHTS_URL" | grep -q '/releases/download/'; then
-              WEIGHTS_LAYOUT="flat"
+              WEIGHTS_LAYOUT="tar"
           else
               WEIGHTS_LAYOUT="nested"
           fi

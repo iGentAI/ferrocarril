@@ -1,11 +1,11 @@
 // ferrocarril-wasm browser demo runner.
 //
 // Flow:
-//   1. Fetch weights JSON metadata (config, metadata, voices)
-//   2. Populate the voice picker
-//   3. On "Load model": fetch every tensor + selected voice blob,
-//      streaming through an IndexedDB cache so returning visitors
-//      skip the ~340 MB cold download, then build the FerroModel.
+//   1. Fetch weights (either a single `weights.tar` for `tar` layout,
+//      or 550+ individual blobs for `nested` / `flat` layouts).
+//   2. Populate the voice picker from voices.json.
+//   3. Build the FerroModel by feeding every tensor + voice blob
+//      into WasmFerroModelBuilder, then call .build().
 //   4. On "Synthesise": call WasmFerroModel.synthesize_text with the
 //      English text, the selected voice pack bytes, and a speed
 //      factor, and play the resulting 24 kHz PCM as a WAV blob.
@@ -15,14 +15,26 @@
 // time:
 //
 //   <meta name="ferrocarril-weights-url" content="{{url}}">
-//   <meta name="ferrocarril-weights-layout" content="{{nested|flat}}">
+//   <meta name="ferrocarril-weights-layout" content="{{nested|flat|tar}}">
 //
-// The URL is the base prefix under which blobs live. The layout
-// decides whether `/` in asset paths is preserved (`nested`, default)
-// or rewritten to `__` (`flat`, required for GitHub Release assets
-// which cannot contain `/`). A `?weights=<url>` query parameter can
-// override the URL for debugging; append `&layout=flat` to also
-// override the layout.
+// Supported layouts:
+//   - `nested` (default): each tensor/voice blob at its natural
+//     relative path under `{url}`, e.g. `{url}/model/metadata.json`
+//     and `{url}/voices/af_heart.bin`. Used by the local serve.py
+//     development flow, Hugging Face Hub, Cloudflare R2, S3, and any
+//     host that supports directory paths in URLs.
+//   - `flat`: same per-file layout but with `/` replaced by `__`,
+//     e.g. `{url}/model__metadata.json`. Legacy — kept for any
+//     existing mirror that predates the tar mode.
+//   - `tar`: single `{url}/weights.tar` asset containing every blob;
+//     parsed inline on the client. Used for GitHub Releases, which
+//     rate-limit release asset uploads to 500/hour (so uploading 605
+//     individual files is not viable) and also benefits from the
+//     single-fetch cold-load path.
+//
+// The URL can be overridden at runtime via `?weights=<url>` and the
+// layout via `?layout=nested|flat|tar` query parameters, useful for
+// debugging or for testing alternative hosts.
 
 import init, { WasmFerroModelBuilder } from "./pkg/ferrocarril_wasm.js";
 
@@ -56,6 +68,7 @@ const FETCH_CONCURRENCY = 12;
 const IDB_NAME = "ferrocarril-weights";
 const IDB_STORE = "blobs";
 const IDB_VERSION = 1;
+const TAR_BLOCK_SIZE = 512;
 
 // ---------------------------------------------------------------------------
 // State
@@ -104,16 +117,17 @@ function getWeightsLayout() {
     const fromMeta = metaTag ? metaTag.getAttribute("content") : "";
     const fromQuery = new URLSearchParams(window.location.search).get("layout");
     const value = (fromQuery || fromMeta || "nested").trim().toLowerCase();
-    return value === "flat" ? "flat" : "nested";
+    if (value === "tar") return "tar";
+    if (value === "flat") return "flat";
+    return "nested";
 }
 
 /**
  * Given a path relative to the weights root (e.g. "model/metadata.json"
  * or "voices/af_heart.bin"), return the absolute URL to fetch it from,
- * applying the configured layout rewrite if needed. For `nested` the
- * path is passed through verbatim; for `flat` every `/` is replaced
- * with `__` to match the asset naming produced by the release-weights
- * workflow (GitHub Release asset names cannot contain `/`).
+ * applying the configured layout rewrite if needed. Used by the
+ * per-file (nested / flat) layouts only — the tar layout fetches a
+ * single `weights.tar` asset and parses it inline.
  */
 function assetUrl(relPath) {
     const base = getWeightsBaseUrl();
@@ -124,11 +138,9 @@ function assetUrl(relPath) {
 }
 
 /**
- * IndexedDB cache key for a given relative path. Always keyed by the
- * nested-form path plus the base URL: this way a layout switch for
- * the same host reuses the cached bytes (same content, different URL
- * shape), and a host switch (new base URL, e.g. new release tag)
- * invalidates the entry automatically.
+ * IndexedDB cache key. Keyed by the base URL plus the nested-form
+ * relative path, so the cache invalidates when the host changes and
+ * survives a layout swap on the same host.
  */
 function cacheKey(relPath) {
     return `${getWeightsBaseUrl()}::${relPath}`;
@@ -196,11 +208,141 @@ async function fetchBlobCached(db, relPath) {
     const r = await fetch(url);
     if (!r.ok) throw new Error(`fetch ${url} -> HTTP ${r.status}`);
     const bytes = new Uint8Array(await r.arrayBuffer());
-    // Fire-and-forget the cache write so it doesn't block model build.
     idbPut(db, key, bytes).catch((err) => {
         console.warn("IndexedDB put failed for", key, err);
     });
     return { bytes, fromCache: false };
+}
+
+// ---------------------------------------------------------------------------
+// Streaming fetch with progress (used by the tar loader)
+// ---------------------------------------------------------------------------
+
+async function fetchWithProgress(url, onProgress) {
+    const r = await fetch(url);
+    if (!r.ok) throw new Error(`fetch ${url} -> HTTP ${r.status}`);
+    const total = parseInt(r.headers.get("content-length") || "0", 10);
+
+    // Older runtimes without ReadableStream fall through to the
+    // simple `arrayBuffer()` path with a single progress update.
+    if (!r.body || typeof r.body.getReader !== "function") {
+        const buf = await r.arrayBuffer();
+        if (onProgress) onProgress(buf.byteLength, buf.byteLength);
+        return buf;
+    }
+
+    const reader = r.body.getReader();
+    const chunks = [];
+    let received = 0;
+    while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        chunks.push(value);
+        received += value.length;
+        if (onProgress) onProgress(received, total);
+    }
+
+    const out = new Uint8Array(received);
+    let offset = 0;
+    for (const chunk of chunks) {
+        out.set(chunk, offset);
+        offset += chunk.length;
+    }
+    return out.buffer;
+}
+
+// ---------------------------------------------------------------------------
+// Minimal inline USTAR tar reader
+// ---------------------------------------------------------------------------
+//
+// Handles the flavour produced by GNU tar with default options:
+//   - 512-byte header per entry (name 0-99, size 124-135 as octal
+//     ASCII, typeflag at byte 156).
+//   - Optional USTAR name prefix at bytes 345-499 for files whose
+//     full path exceeds 100 chars; detected by the "ustar" magic at
+//     bytes 257-261.
+//   - End of archive is two consecutive 512-byte zero blocks; we
+//     stop at the first one.
+//   - Content is padded to the next 512-byte boundary.
+//
+// Returns a `Map<string, Uint8Array>` keyed by the path-relative-to-
+// the-tar-root (with any leading "./" stripped), where each value is
+// a zero-copy subarray view into the input `buffer`. The caller must
+// keep `buffer` alive for as long as the values are in use.
+
+function parseTar(buffer) {
+    const u8 = new Uint8Array(buffer);
+    const files = new Map();
+    const decoder = new TextDecoder("utf-8");
+    let offset = 0;
+
+    while (offset + TAR_BLOCK_SIZE <= u8.length) {
+        const header = u8.subarray(offset, offset + TAR_BLOCK_SIZE);
+
+        // End-of-archive marker: a zero block.
+        let allZero = true;
+        for (let i = 0; i < TAR_BLOCK_SIZE; i++) {
+            if (header[i] !== 0) {
+                allZero = false;
+                break;
+            }
+        }
+        if (allZero) break;
+
+        // Name (bytes 0-99, null-terminated).
+        let nameLen = 0;
+        while (nameLen < 100 && header[nameLen] !== 0) nameLen++;
+        let name = decoder.decode(header.subarray(0, nameLen));
+
+        // USTAR name prefix (bytes 345-499), if this is a ustar archive.
+        // Magic check: bytes 257-261 == "ustar".
+        const isUstar =
+            header[257] === 0x75 /* u */ &&
+            header[258] === 0x73 /* s */ &&
+            header[259] === 0x74 /* t */ &&
+            header[260] === 0x61 /* a */ &&
+            header[261] === 0x72 /* r */;
+        if (isUstar) {
+            let prefixLen = 0;
+            while (prefixLen < 155 && header[345 + prefixLen] !== 0) prefixLen++;
+            if (prefixLen > 0) {
+                const prefix = decoder.decode(header.subarray(345, 345 + prefixLen));
+                name = prefix + "/" + name;
+            }
+        }
+
+        // Size (bytes 124-135, octal ASCII with possible trailing
+        // space or null).
+        let sizeStr = "";
+        for (let i = 124; i < 136; i++) {
+            const c = header[i];
+            if (c >= 0x30 /* '0' */ && c <= 0x37 /* '7' */) {
+                sizeStr += String.fromCharCode(c);
+            }
+        }
+        const size = sizeStr ? parseInt(sizeStr, 8) : 0;
+
+        // Type flag (byte 156): '0' (0x30) or '\0' (0x00) = regular
+        // file; '5' (0x35) = directory; 'x' (0x78) = pax extended
+        // header (skip); others (symlinks, etc.) also skipped.
+        const typeFlag = header[156];
+
+        offset += TAR_BLOCK_SIZE;
+
+        if ((typeFlag === 0x30 || typeFlag === 0x00) && size > 0 && name) {
+            const cleanName = name.startsWith("./") ? name.slice(2) : name;
+            if (cleanName) {
+                files.set(cleanName, u8.subarray(offset, offset + size));
+            }
+        }
+
+        // Advance past the content, padded to the next 512-byte
+        // boundary. `Math.ceil(size / BLOCK) * BLOCK` handles the
+        // size === 0 case correctly (adds 0).
+        offset += Math.ceil(size / TAR_BLOCK_SIZE) * TAR_BLOCK_SIZE;
+    }
+
+    return files;
 }
 
 // ---------------------------------------------------------------------------
@@ -291,14 +433,13 @@ function populateVoicePicker(voices) {
         opt.textContent = name;
         voiceSelect.appendChild(opt);
     }
-    // Prefer af_heart as default, fall back to first name.
     const defaultName = names.includes("af_heart") ? "af_heart" : names[0];
     voiceSelect.value = defaultName;
     voiceSelect.disabled = false;
 }
 
 // ---------------------------------------------------------------------------
-// Bulk blob fetch (concurrency-bounded, IDB-cached)
+// Per-file blob fetch (nested + flat layouts)
 // ---------------------------------------------------------------------------
 //
 // Takes a list of full relative paths from the weights root
@@ -330,8 +471,189 @@ async function fetchAllBlobs(db, relPaths, onProgress) {
     return results;
 }
 
+async function loadModelFromFiles(db) {
+    statusNeutral(loadStatus, "Fetching config.json / metadata.json / voices.json...");
+    const [configJson, metadataJson, voicesJson] = await Promise.all([
+        fetchText("config.json"),
+        fetchText("model/metadata.json"),
+        fetchText("voices/voices.json"),
+    ]);
+
+    const metadata = JSON.parse(metadataJson);
+    voicesMeta = JSON.parse(voicesJson);
+    populateVoicePicker(voicesMeta.voices);
+
+    const tensorFiles = enumerateTensorFiles(metadata);
+    const tensorPaths = tensorFiles.map((f) => "model/" + f);
+
+    const voiceName = voiceSelect.value;
+    const voiceMeta = voicesMeta.voices[voiceName];
+    if (!voiceMeta) throw new Error(`voice '${voiceName}' missing from voices.json`);
+
+    statusNeutral(
+        loadStatus,
+        `Fetching ${tensorFiles.length} tensor blobs + 1 voice pack (${voiceName})...`,
+    );
+
+    const tensorBlobsByPath = await fetchAllBlobs(
+        db,
+        tensorPaths,
+        (done, total, fromCache) => {
+            loadProgress.value = (done / total) * 0.95;
+            loadStatusShort.textContent = `tensors ${done}/${total} (${fromCache} cached)`;
+            statusNeutral(
+                loadStatus,
+                `Fetching tensors ${done}/${total} (${fromCache} served from IndexedDB cache)`,
+            );
+        },
+    );
+
+    statusNeutral(loadStatus, `Fetching voice pack ${voiceName}...`);
+    const voiceFetchPath = `voices/${voiceMeta.file}`;
+    const { bytes: voicePackBytes, fromCache: voiceFromCache } =
+        await fetchBlobCached(db, voiceFetchPath);
+    loadedVoicePacks.set(voiceName, voicePackBytes);
+    currentVoiceName = voiceName;
+
+    loadProgress.value = 0.98;
+    statusNeutral(
+        loadStatus,
+        `Constructing FerroModel (${tensorFiles.length} tensors, voice ${voiceName}${voiceFromCache ? " [cached]" : ""})...`,
+    );
+
+    const builder = new WasmFerroModelBuilder(configJson, metadataJson, voicesJson);
+    for (const [relPath, bytes] of tensorBlobsByPath.entries()) {
+        const key = relPath.startsWith("model/")
+            ? relPath.slice("model/".length)
+            : relPath;
+        builder.add_model_blob(key, bytes);
+    }
+    builder.add_voice_blob(voiceMeta.file, voicePackBytes);
+
+    loadedModel = builder.build();
+    return { tensorCount: tensorFiles.length, voiceName };
+}
+
 // ---------------------------------------------------------------------------
-// Load model
+// Tar blob fetch + inline parse (tar layout)
+// ---------------------------------------------------------------------------
+
+async function loadModelFromTar(db) {
+    const baseUrl = getWeightsBaseUrl();
+    const tarCacheKey = `${baseUrl}::weights.tar`;
+
+    // Try IndexedDB cache first.
+    statusNeutral(loadStatus, "Checking IndexedDB cache for weights.tar...");
+    let tarBuffer = null;
+    let tarFromCache = false;
+    const cached = await idbGet(db, tarCacheKey).catch(() => null);
+    if (cached instanceof Uint8Array) {
+        tarBuffer = cached.buffer.slice(cached.byteOffset, cached.byteOffset + cached.byteLength);
+        tarFromCache = true;
+    } else if (cached instanceof ArrayBuffer) {
+        tarBuffer = cached;
+        tarFromCache = true;
+    }
+
+    if (!tarFromCache) {
+        const tarUrl = baseUrl + "weights.tar";
+        statusNeutral(loadStatus, `Fetching weights.tar from ${tarUrl}...`);
+        tarBuffer = await fetchWithProgress(tarUrl, (done, total) => {
+            const mb = (done / 1024 / 1024).toFixed(0);
+            const totalMb = total > 0 ? (total / 1024 / 1024).toFixed(0) : "?";
+            const pct = total > 0 ? done / total : 0;
+            loadProgress.value = pct * 0.75;
+            loadStatusShort.textContent = `${mb} / ${totalMb} MB`;
+            statusNeutral(
+                loadStatus,
+                `Fetching weights.tar: ${mb} / ${totalMb} MB`,
+            );
+        });
+
+        // Cache the tar for returning visitors. Fire-and-forget so
+        // failures don't block model construction.
+        idbPut(db, tarCacheKey, new Uint8Array(tarBuffer)).catch((err) => {
+            console.warn("IndexedDB put failed for weights.tar", err);
+        });
+    } else {
+        const mb = (tarBuffer.byteLength / 1024 / 1024).toFixed(0);
+        statusNeutral(
+            loadStatus,
+            `weights.tar served from IndexedDB cache (${mb} MB)`,
+        );
+        loadProgress.value = 0.75;
+    }
+
+    statusNeutral(loadStatus, "Parsing tar archive...");
+    loadProgress.value = 0.78;
+    const tarFiles = parseTar(tarBuffer);
+    loadStatusShort.textContent = `${tarFiles.size} entries`;
+
+    // Extract JSON metadata from the tar.
+    const configBytes = tarFiles.get("config.json");
+    const metadataBytes = tarFiles.get("model/metadata.json");
+    const voicesBytes = tarFiles.get("voices/voices.json");
+    if (!configBytes) throw new Error("weights.tar missing config.json");
+    if (!metadataBytes) throw new Error("weights.tar missing model/metadata.json");
+    if (!voicesBytes) throw new Error("weights.tar missing voices/voices.json");
+
+    const textDecoder = new TextDecoder("utf-8");
+    const configJson = textDecoder.decode(configBytes);
+    const metadataJson = textDecoder.decode(metadataBytes);
+    const voicesJson = textDecoder.decode(voicesBytes);
+
+    const metadata = JSON.parse(metadataJson);
+    voicesMeta = JSON.parse(voicesJson);
+    populateVoicePicker(voicesMeta.voices);
+
+    const voiceName = voiceSelect.value;
+    const voiceMeta = voicesMeta.voices[voiceName];
+    if (!voiceMeta) throw new Error(`voice '${voiceName}' missing from voices.json`);
+
+    // Pre-load every voice pack into `loadedVoicePacks` so subsequent
+    // voice switches don't need to re-fetch the tar. Each voice pack
+    // is ~522 KB; all 54 together are ~28 MB, which is cheap.
+    const voiceNames = Object.keys(voicesMeta.voices);
+    for (const vname of voiceNames) {
+        const vmeta = voicesMeta.voices[vname];
+        const tarKey = `voices/${vmeta.file}`;
+        const vbytes = tarFiles.get(tarKey);
+        if (vbytes) {
+            loadedVoicePacks.set(vname, new Uint8Array(vbytes));
+        }
+    }
+    currentVoiceName = voiceName;
+    const selectedVoicePack = loadedVoicePacks.get(voiceName);
+    if (!selectedVoicePack) {
+        throw new Error(`weights.tar missing voices/${voiceMeta.file}`);
+    }
+
+    loadProgress.value = 0.85;
+    const tensorFiles = enumerateTensorFiles(metadata);
+    statusNeutral(
+        loadStatus,
+        `Constructing FerroModel (${tensorFiles.length} tensors from tar${tarFromCache ? " [cached]" : ""})...`,
+    );
+
+    const builder = new WasmFerroModelBuilder(configJson, metadataJson, voicesJson);
+    for (const tensorFile of tensorFiles) {
+        const tarKey = "model/" + tensorFile;
+        const bytes = tarFiles.get(tarKey);
+        if (!bytes) {
+            throw new Error(`weights.tar missing ${tarKey}`);
+        }
+        builder.add_model_blob(tensorFile, bytes);
+    }
+    builder.add_voice_blob(voiceMeta.file, selectedVoicePack);
+
+    loadedModel = builder.build();
+    loadProgress.value = 1;
+
+    return { tensorCount: tensorFiles.length, voiceName };
+}
+
+// ---------------------------------------------------------------------------
+// Load model button handler
 // ---------------------------------------------------------------------------
 
 loadBtn.addEventListener("click", async () => {
@@ -355,81 +677,20 @@ loadBtn.addEventListener("click", async () => {
         loadProgress.value = 0;
         await ensureWasm();
 
-        statusNeutral(loadStatus, "Fetching config.json / metadata.json / voices.json...");
-        const [configJson, metadataJson, voicesJson] = await Promise.all([
-            fetchText("config.json"),
-            fetchText("model/metadata.json"),
-            fetchText("voices/voices.json"),
-        ]);
-
-        const metadata = JSON.parse(metadataJson);
-        voicesMeta = JSON.parse(voicesJson);
-        populateVoicePicker(voicesMeta.voices);
-
-        // `tensorFiles` are the `file` fields from metadata.json — they
-        // are relative to the `model/` directory (e.g. "bert/foo.bin").
-        // The native loader expects keys in this form. For HTTP fetching
-        // we need the full rel path from the weights root.
-        const tensorFiles = enumerateTensorFiles(metadata);
-        const tensorPaths = tensorFiles.map((f) => "model/" + f);
-
-        const voiceName = voiceSelect.value;
-        const voiceMeta = voicesMeta.voices[voiceName];
-        if (!voiceMeta) throw new Error(`voice '${voiceName}' missing from voices.json`);
-
-        statusNeutral(
-            loadStatus,
-            `Fetching ${tensorFiles.length} tensor blobs + 1 voice pack (${voiceName})...`,
-        );
-
         const db = await openIdb();
 
-        const tensorBlobsByPath = await fetchAllBlobs(
-            db,
-            tensorPaths,
-            (done, total, fromCache) => {
-                loadProgress.value = (done / total) * 0.95;
-                loadStatusShort.textContent = `tensors ${done}/${total} (${fromCache} cached)`;
-                statusNeutral(
-                    loadStatus,
-                    `Fetching tensors ${done}/${total} (${fromCache} served from IndexedDB cache)`,
-                );
-            },
-        );
-
-        // Voice pack
-        statusNeutral(loadStatus, `Fetching voice pack ${voiceName}...`);
-        const voiceFetchPath = `voices/${voiceMeta.file}`;
-        const { bytes: voicePackBytes, fromCache: voiceFromCache } =
-            await fetchBlobCached(db, voiceFetchPath);
-        loadedVoicePacks.set(voiceName, voicePackBytes);
-        currentVoiceName = voiceName;
-
-        loadProgress.value = 0.98;
-        statusNeutral(
-            loadStatus,
-            `Constructing FerroModel (${tensorFiles.length} tensors, voice ${voiceName}${voiceFromCache ? " [cached]" : ""})...`,
-        );
-
-        const builder = new WasmFerroModelBuilder(configJson, metadataJson, voicesJson);
-        for (const [relPath, bytes] of tensorBlobsByPath.entries()) {
-            // The native loader's key for a tensor is the metadata.json
-            // `file` field, which is the path relative to `model/`. We
-            // fetched under "model/<file>", so strip the prefix here.
-            const key = relPath.startsWith("model/")
-                ? relPath.slice("model/".length)
-                : relPath;
-            builder.add_model_blob(key, bytes);
+        let result;
+        if (layout === "tar") {
+            result = await loadModelFromTar(db);
+        } else {
+            result = await loadModelFromFiles(db);
         }
-        builder.add_voice_blob(voiceMeta.file, voicePackBytes);
 
-        loadedModel = builder.build();
         loadProgress.value = 1;
-
         speakBtn.disabled = false;
         statusOk(
             loadStatus,
-            `Model loaded. ${tensorFiles.length} tensors + voice '${voiceName}' ready. ` +
+            `Model loaded. ${result.tensorCount} tensors + voice '${result.voiceName}' ready. ` +
             `Click "Synthesise" to run inference.`,
         );
         loadStatusShort.textContent = "ready";
@@ -447,7 +708,7 @@ loadBtn.addEventListener("click", async () => {
 });
 
 // ---------------------------------------------------------------------------
-// Voice switching: re-fetch if user picks a different voice
+// Voice switching
 // ---------------------------------------------------------------------------
 
 async function ensureVoicePack(voiceName) {
@@ -455,6 +716,18 @@ async function ensureVoicePack(voiceName) {
     if (!voicesMeta) throw new Error("voices metadata not loaded");
     const voiceMeta = voicesMeta.voices[voiceName];
     if (!voiceMeta) throw new Error(`voice '${voiceName}' missing from voices.json`);
+
+    const layout = getWeightsLayout();
+    if (layout === "tar") {
+        // Tar mode pre-loads every voice during the initial build, so
+        // if we got here it's because the voice is genuinely missing
+        // from the tar.
+        throw new Error(
+            `voice '${voiceName}' was not in the loaded weights.tar; ` +
+            `re-load the model to pick up new voices`,
+        );
+    }
+
     const db = await openIdb();
     const voiceFetchPath = `voices/${voiceMeta.file}`;
     const { bytes } = await fetchBlobCached(db, voiceFetchPath);
